@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 import io, re, time, requests, random, string, os
 from typing import Dict, List, Optional
-from difflib import SequenceMatcher
 from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
 
 def get_dropbox_download_link(shared_link):
     if 'dropbox.com' in shared_link:
@@ -110,25 +110,92 @@ class AuthenticationManager:
     def is_valid(self): return st.session_state.authenticated and st.session_state.auth_time and datetime.now() - st.session_state.auth_time <= timedelta(minutes=SESSION_TIMEOUT_MINUTES)
     def logout(self): st.session_state.authenticated, st.session_state.user_email, st.session_state.auth_time = False, "", None
 
-class SimpleUKExtractor:
-    def __init__(self): self.s = requests.Session(); self.s.headers.update({'User-Agent': 'Mozilla/5.0'})
+class EnhancedUKExtractor:
+    """UK Company Number Extractor - Full Original Logic"""
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({'User-Agent': 'Mozilla/5.0'})
+        self.patterns = [
+            r'Company\s+number[\s:]*([0-9]{8})',
+            r'(?:Company|Co\.|Ltd\.)\s+(?:No\.|Number)[\s:]*([0-9]{8})',
+            r'(?:Registered|Registration)\s+(?:No\.|Number)[\s:]*([0-9]{8})',
+            r'([0-9]{8})\s*(?:Company|Registered)',
+            r'\b([0-9]{8})\b'  
+        ]
     def process(self, name, url=None):
         r = {'company_name': name, 'website': url or '', 'status': 'Not Found', 'source': 'web'}
         if url:
             try:
-                resp = self.s.get(url, timeout=10)
+                resp = self.session.get(url, timeout=10)
                 if resp.status_code == 200:
-                    for m in re.finditer(r'Company\s+number[\s:]*([0-9]{8})', resp.text, re.I):
-                        c = re.sub(r'[^0-9]', '', m.group(1))
-                        if len(c) in [6, 8]: r['company_number'], r['status'] = c, 'Found'; return r
+                    soup = BeautifulSoup(resp.text, 'html.parser')
+                    for pattern in self.patterns:
+                        for match in re.finditer(pattern, resp.text, re.I):
+                            code = re.sub(r'[^0-9]', '', match.group(1) if match.lastindex else match.group(0))
+                            if len(code) == 8 and code[0] != '0':
+                                r['company_number'] = code
+                                r['status'] = 'Found'
+                                return r
             except: pass
         return r
 
 class MultiModeExtractor:
     def __init__(self, db=None, use_db=True):
         self.db, self.use_db = db, use_db
-        self.extractors = {'GB': SimpleUKExtractor()}
-        self.patterns = {'DE': [r'Steuernummer[\s#:]*([0-9]{2,3}/[0-9]{3,4}/[0-9]{4,5})'], 'FR': [r'SIREN[\s#:]*([0-9]{9})'], 'IT': [r'P\.?\s*IVA[\s#:]*([0-9]{11})'], 'PT': [r'NIF[\s:]*([0-9]{9})'], 'NL': [r'KvK[\s#:]*([0-9]{8})'], 'AT': [r'ATU\s*([0-9]{8})'], 'CH': [r'CHE[\s-]?([0-9]{3})'], 'LU': [r'LU\s*([0-9]{8})']}
+        self.extractors = {'GB': EnhancedUKExtractor()}
+        # ALL ORIGINAL PATTERNS FROM YOUR EXTRACTORS
+        self.patterns = {
+            'DE': [  # Germany - from new_vat_extractor_germany3.py
+                r'Steuernummer[\s#:]*([0-9]{2,3}/[0-9]{3,4}/[0-9]{4,5})',
+                r'Steuer-?Nr\.?[\s#:]*([0-9]{2,3}/[0-9]{3,4}/[0-9]{4,5})',
+                r'Handelsregisternummer[\s#:]*([HRA|HRB]{2,3}\s*[0-9]{1,6})',
+                r'Umsatzsteuer-?ID[\s#:]*([D|DE]{1,2}[0-9]{9})',
+                r'USt-?IdNr\.?[\s#:]*([D|DE]{1,2}[0-9]{9})'
+            ],
+            'FR': [  # France - from new_vat_extractor_france2.py
+                r'SIREN[\s#:]*([0-9]{9})',
+                r'(?:N°\s*SIREN|Numéro\s*SIREN)[\s#:]*([0-9]{9})',
+                r'SIRET[\s#:]*([0-9]{14})',
+                r'TVA[\s#:]*FR([0-9A-Z]{2}[0-9]{9})',
+                r'N°\s*TVA[\s#:]*FR([0-9A-Z]{2}[0-9]{9})'
+            ],
+            'IT': [  # Italy - from new_vat_extractor_ita2.py
+                r'P\.?\s*IVA[\s#:]*([0-9]{11})',
+                r'Partita\s+IVA[\s#:]*([0-9]{11})',
+                r'Codice\s+Fiscale[\s#:]*([A-Z0-9]{11,16})',
+                r'C\.?F\.?[\s#:]*([A-Z0-9]{11,16})'
+            ],
+            'PT': [  # Portugal - from portuguese_company_extractorCLAUDE2.py
+                r'NIF[\s#:]*([0-9]{9})',
+                r'N\.?I\.?F\.?[\s#:]*([0-9]{9})',
+                r'Contribuinte[\s#:]*([0-9]{9})',
+                r'NIPC[\s#:]*([0-9]{9})'
+            ],
+            'NL': [  # Netherlands - from new_vat_extractor_nl.py  
+                r'KvK[\s#:]*([0-9]{8})',
+                r'(?:Kamer\s+van\s+Koophandel|K\.v\.K\.?)[\s#:]*([0-9]{8})',
+                r'RSIN[\s#:]*([0-9]{9})',
+                r'BTW[\s#:]*NL([0-9]{9}B[0-9]{2})',
+                r'LEI[\s#:]*([A-Z0-9]{20})'
+            ],
+            'AT': [  # Austria - from austrian_company_extractor.py
+                r'ATU\s*([0-9]{8})',
+                r'UID[\s#:]*ATU([0-9]{8})',
+                r'Umsatzsteuer-?ID[\s#:]*ATU([0-9]{8})',
+                r'FN[\s#:]*([0-9]{6}[a-z])'
+            ],
+            'CH': [  # Switzerland - from swiss_company_extractor.py
+                r'CHE[\s-]?([0-9]{3})\.?([0-9]{3})\.?([0-9]{3})',
+                r'UID[\s#:]*CHE[\s-]?([0-9]{3})\.?([0-9]{3})\.?([0-9]{3})',
+                r'CH-ID[\s#:]*CH-([0-9]{3})\.?([0-9]{1})\.?([0-9]{3})\.?([0-9]{3})-?([0-9]{1})'
+            ],
+            'LU': [  # Luxembourg - from luxembourg_company_extractor_swiftshader.py
+                r'LU\s*([0-9]{8})',
+                r'TVA[\s#:]*LU([0-9]{8})',
+                r'B([0-9]{6})',  # Registration number
+                r'L\.?U\.?R[\s#:]*([0-9]{6})'
+            ]
+        }
     def process_single(self, name, web, country, vat=None):
         if self.use_db and self.db:
             r = self.db.search_name(name, country)
@@ -136,25 +203,42 @@ class MultiModeExtractor:
             if vat:
                 r = self.db.search_vat(vat, country)
                 if r: return {**r, 'search_method': 'DB-VAT', 'status': 'Found'}
-            w = self._web(name, web, country); w['search_method'] = 'DB failed-Web'; return w
-        w = self._web(name, web, country); w['search_method'] = 'Web only'; return w
+            w = self._web(name, web, country)
+            w['search_method'] = 'DB failed → Web'
+            return w
+        w = self._web(name, web, country)
+        w['search_method'] = 'Web only'
+        return w
     def _web(self, name, web, country):
-        if country in self.extractors: return self.extractors[country].process(name, web)
+        if country in self.extractors:
+            return self.extractors[country].process(name, web)
         r = {'company_name': name, 'website': web, 'country_code': country, 'status': 'Not Found', 'source': 'web'}
         if web and country in self.patterns:
             try:
                 resp = requests.get(web, timeout=10)
                 if resp.status_code == 200:
-                    for p in self.patterns[country]:
-                        for m in re.finditer(p, resp.text, re.I): r[f'{country.lower()}_code'], r['status'] = m.group(1), 'Found'; break
+                    soup = BeautifulSoup(resp.text, 'html.parser')
+                    text_content = soup.get_text()
+                    for pattern in self.patterns[country]:
+                        matches = re.finditer(pattern, text_content, re.I)
+                        for match in matches:
+                            extracted = match.group(1) if match.lastindex else match.group(0)
+                            field_name = f'{country.lower()}_code'
+                            r[field_name] = extracted.strip()
+                            r['status'] = 'Found'
+                            return r
             except: pass
         return r
     def process_list(self, df, prog=None):
         results = []
-        nc = [c for c in df.columns if 'company' in c.lower() or 'name' in c.lower()]; name_col = nc[0] if nc else df.columns[0]
-        wc = [c for c in df.columns if 'website' in c.lower() or 'url' in c.lower()]; web_col = wc[0] if wc else None
-        cc = [c for c in df.columns if 'country' in c.lower()]; country_col = cc[0] if cc else None
-        vc = [c for c in df.columns if 'vat' in c.lower() or 'fiscal' in c.lower()]; vat_col = vc[0] if vc else None
+        nc = [c for c in df.columns if 'company' in c.lower() or 'name' in c.lower()]
+        name_col = nc[0] if nc else df.columns[0]
+        wc = [c for c in df.columns if 'website' in c.lower() or 'url' in c.lower()]
+        web_col = wc[0] if wc else None
+        cc = [c for c in df.columns if 'country' in c.lower()]
+        country_col = cc[0] if cc else None
+        vc = [c for c in df.columns if 'vat' in c.lower() or 'fiscal' in c.lower()]
+        vat_col = vc[0] if vc else None
         for idx, row in df.iterrows():
             if prog: prog(idx+1, len(df))
             name = str(row[name_col]).strip() if pd.notna(row[name_col]) else ""
@@ -164,31 +248,47 @@ class MultiModeExtractor:
             if country_col and pd.notna(row[country_col]):
                 cv = str(row[country_col]).strip().upper()
                 if len(cv) == 2 and cv in COUNTRY_CODES: country = cv
-            results.append(self.process_single(name, web, country, vat)); time.sleep(0.2)
+            results.append(self.process_single(name, web, country, vat))
+            time.sleep(0.2)
         return results
 
 def show_auth(auth):
-    st.title("🔐 arKap VAT Extractor"); st.info("🏢 @arkap.ch only")
+    st.title("🔐 arKap VAT Extractor")
+    st.info("🏢 @arkap.ch only")
     t1, t2 = st.tabs(["📧 Email", "🔑 Code"])
     with t1:
         e = st.text_input("Email")
         if st.button("Send Code", type="primary"):
-            if auth.is_valid_email(e): c = auth.gen_code(); auth.store_code(e, c); st.success(f"Code: {c}")
-            else: st.error("Invalid")
+            if auth.is_valid_email(e):
+                c = auth.gen_code()
+                auth.store_code(e, c)
+                st.success(f"Code: {c}")
+            else:
+                st.error("Invalid")
     with t2:
-        e = st.text_input("Email", key="e2"); c = st.text_input("Code", max_chars=6)
+        e = st.text_input("Email", key="e2")
+        c = st.text_input("Code", max_chars=6)
         if st.button("Verify", type="primary"):
             ok, msg = auth.verify(e, c)
-            if ok: st.success(msg); st.balloons(); time.sleep(1); st.rerun()
-            else: st.error(msg)
+            if ok:
+                st.success(msg)
+                st.balloons()
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error(msg)
 
 def show_main():
     st.title("🌍 arKap VAT Extractor")
     c1, c2 = st.columns([3,1])
-    with c1: st.markdown(f"**User:** {st.session_state.user_email}")
+    with c1:
+        st.markdown(f"**User:** {st.session_state.user_email}")
     with c2:
-        if st.button("Logout"): AuthenticationManager().logout(); st.rerun()
+        if st.button("Logout"):
+            AuthenticationManager().logout()
+            st.rerun()
     st.markdown("---")
+
     if st.session_state.company_db is None:
         st.header("📊 Database Setup")
         with st.expander("ℹ️ Dropbox Setup", expanded=True):
@@ -205,43 +305,67 @@ def show_main():
             df = pd.read_csv(up) if up.name.endswith('.csv') else pd.read_excel(up)
             st.session_state.company_db = CompanyDatabase(df)
             st.rerun()
-        if st.button("⏭️ Web Only"): st.session_state.search_mode = 'web'; st.rerun()
+        if st.button("⏭️ Web Only"):
+            st.session_state.search_mode = 'web'
+            st.rerun()
         return
+
     if st.session_state.search_mode is None:
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("🗄️ DB+Web", type="primary", use_container_width=True): st.session_state.search_mode = 'db'; st.rerun()
+            if st.button("🗄️ DB+Web", type="primary", use_container_width=True):
+                st.session_state.search_mode = 'db'
+                st.rerun()
         with c2:
-            if st.button("🌐 Web Only", use_container_width=True): st.session_state.search_mode = 'web'; st.rerun()
+            if st.button("🌐 Web Only", use_container_width=True):
+                st.session_state.search_mode = 'web'
+                st.rerun()
         return
+
     st.info(f"Mode: {st.session_state.search_mode.upper()}")
-    if st.button("Change"): st.session_state.search_mode = None; st.rerun()
+    if st.button("Change"):
+        st.session_state.search_mode = None
+        st.rerun()
     st.markdown("---")
+
     t1, t2 = st.tabs(["Bulk", "Single"])
     with t1:
         f = st.file_uploader("Company List", type=['csv','xlsx'])
         if f:
-            df = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f); st.dataframe(df.head())
+            df = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
+            st.dataframe(df.head())
             if st.button("Process"):
                 ext = MultiModeExtractor(st.session_state.company_db, st.session_state.search_mode=='db')
-                p = st.progress(0); res = ext.process_list(df, lambda c,t: p.progress(c/t))
-                rdf = pd.DataFrame(res); st.dataframe(rdf)
+                p = st.progress(0)
+                res = ext.process_list(df, lambda c,t: p.progress(c/t))
+                rdf = pd.DataFrame(res)
+                st.dataframe(rdf)
                 c1,c2,c3 = st.columns(3)
-                with c1: st.metric("Total", len(res))
-                with c2: st.metric("Found", len([r for r in res if r['status']=='Found']))
-                with c3: st.metric("Rate%", f"{len([r for r in res if r['status']=='Found'])/len(res)*100:.1f}")
-                csv = io.StringIO(); rdf.to_csv(csv, index=False)
+                with c1:
+                    st.metric("Total", len(res))
+                with c2:
+                    st.metric("Found", len([r for r in res if r['status']=='Found']))
+                with c3:
+                    st.metric("Rate%", f"{len([r for r in res if r['status']=='Found'])/len(res)*100:.1f}")
+                csv = io.StringIO()
+                rdf.to_csv(csv, index=False)
                 st.download_button("Download", csv.getvalue(), f"res_{datetime.now().strftime('%Y%m%d_%H%M')}.csv")
+
     with t2:
         c1,c2 = st.columns(2)
-        with c1: n = st.text_input("Name"); w = st.text_input("Website"); v = st.text_input("VAT")
-        with c2: co = st.selectbox("Country", list(COUNTRY_CODES.keys()), format_func=lambda x:f"{COUNTRY_CODES[x]} ({x})")
+        with c1:
+            n = st.text_input("Name")
+            w = st.text_input("Website")
+            v = st.text_input("VAT")
+        with c2:
+            co = st.selectbox("Country", list(COUNTRY_CODES.keys()), format_func=lambda x:f"{COUNTRY_CODES[x]} ({x})")
         if st.button("Search") and n:
             ext = MultiModeExtractor(st.session_state.company_db, st.session_state.search_mode=='db')
             r = ext.process_single(n, w, co, v)
             if r['status']=='Found':
                 st.success(f"✅ {r.get('search_method')}")
                 if r.get('source')=='database':
+                    st.subheader("📊 Database Results")
                     c1,c2=st.columns(2)
                     with c1:
                         for k in ['company_name','vat_code']: 
@@ -249,21 +373,39 @@ def show_main():
                     with c2:
                         for k in ['country_code','nace_code']: 
                             if k in r: st.write(f"**{k}:** {r[k]}")
+                    st.subheader("💰 Financial Data")
                     c1,c2,c3=st.columns(3)
                     with c1:
                         if 'last_yr' in r: st.metric("Year",r['last_yr'])
                         if 'employees' in r: st.metric("Emp",safe_format(r.get('employees')))
                     with c2:
-                        if 'value_of_production_th' in r: st.metric("Prod",safe_format(r.get('value_of_production_th'),pre="€",suf="k"))
-                        if 'ebitda_th' in r: st.metric("EBITDA",safe_format(r.get('ebitda_th'),pre="€",suf="k"))
+                        if 'value_of_production_th' in r: 
+                            st.metric("Prod",safe_format(r.get('value_of_production_th'),pre="€",suf="k"))
+                        if 'ebitda_th' in r: 
+                            st.metric("EBITDA",safe_format(r.get('ebitda_th'),pre="€",suf="k"))
                     with c3:
-                        if 'pfn_th' in r: st.metric("PFN",safe_format(r.get('pfn_th'),pre="€",suf="k"))
-            else: st.warning("Not found")
+                        if 'pfn_th' in r: 
+                            st.metric("PFN",safe_format(r.get('pfn_th'),pre="€",suf="k"))
+                else:
+                    st.subheader("🌐 Web Extraction Results")
+                    extracted_data = {k: v for k, v in r.items() 
+                                    if k not in ['company_name','website','status','source','search_method','country_code']}
+                    if extracted_data:
+                        for key, value in extracted_data.items():
+                            st.write(f"**{key.replace('_', ' ').title()}:** {value}")
+                    else:
+                        st.info("✓ Company verified but no additional codes extracted from website")
+            else:
+                st.warning("❌ Not found in database or website")
+            with st.expander("🔍 Raw Data"):
+                st.json(r)
 
 def main():
     st.set_page_config(page_title="arKap", page_icon="⚡", layout="wide")
     auth = AuthenticationManager()
-    if auth.is_valid(): show_main()
-    else: show_auth(auth)
+    if auth.is_valid():
+        show_main()
+    else:
+        show_auth(auth)
 
 if __name__ == "__main__": main()
