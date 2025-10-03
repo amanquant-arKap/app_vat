@@ -133,8 +133,9 @@ class MultiModeExtractor:
         if self.use_db and self.db:
             r = self.db.search_name(name, country)
             if r: return {**r, 'search_method': 'DB-Name', 'status': 'Found'}
-            if vat: r = self.db.search_vat(vat, country); 
-            if r: return {**r, 'search_method': 'DB-VAT', 'status': 'Found'}
+            if vat:
+                r = self.db.search_vat(vat, country)
+                if r: return {**r, 'search_method': 'DB-VAT', 'status': 'Found'}
             w = self._web(name, web, country); w['search_method'] = 'DB failed-Web'; return w
         w = self._web(name, web, country); w['search_method'] = 'Web only'; return w
     def _web(self, name, web, country):
@@ -195,10 +196,15 @@ def show_main():
             st.write('2. App Settings → Secrets → Add: DROPBOX_FILE_URL = "your_link"')
         if st.button("📥 Load from Dropbox", type="primary"):
             df = load_database_from_dropbox()
-            if df: st.session_state.company_db = CompanyDatabase(df); st.rerun()
+            if df is not None:
+                st.session_state.company_db = CompanyDatabase(df)
+                st.rerun()
         st.markdown("---")
         up = st.file_uploader("Or Upload", type=['xlsx','csv'])
-        if up: df = pd.read_csv(up) if up.name.endswith('.csv') else pd.read_excel(up); st.session_state.company_db = CompanyDatabase(df); st.rerun()
+        if up is not None:
+            df = pd.read_csv(up) if up.name.endswith('.csv') else pd.read_excel(up)
+            st.session_state.company_db = CompanyDatabase(df)
+            st.rerun()
         if st.button("⏭️ Web Only"): st.session_state.search_mode = 'web'; st.rerun()
         return
     if st.session_state.search_mode is None:
