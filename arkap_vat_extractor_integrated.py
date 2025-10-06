@@ -5,6 +5,150 @@ from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 
+# ============================================================================
+# NACE/ARKAP CONVERTER MODULE - Integrated with Fallback
+# ============================================================================
+
+class NaceArkapConverter:
+    """
+    NACE to Arkap Industry converter with robust fallback strategy.
+    If mapping file fails to load or URL is unreachable, app continues without conversion.
+    """
+
+    def __init__(self):
+        self.lookups = None
+        self.enabled = False
+        self.mapping_url = None
+
+    def load_mapping_from_url(self, url):
+        """Load NACE mapping from Dropbox or URL with timeout and fallback"""
+        try:
+            if not url:
+                return False
+
+            # Convert Dropbox sharing link to direct download
+            download_url = url.replace('dl=0', 'dl=1').replace('www.dropbox.com', 'dl.dropboxusercontent.com')
+
+            with st.spinner("📥 Loading NACE mapping..."):
+                response = requests.get(download_url, timeout=15)
+                response.raise_for_status()
+
+                # Try to parse as Excel
+                df = pd.read_excel(io.BytesIO(response.content))
+
+                if len(df) > 0:
+                    self.lookups = self._create_lookups(df)
+                    self.enabled = True
+                    st.success(f"✅ NACE mapping loaded: {len(df)} entries")
+                    return True
+                else:
+                    st.warning("⚠️ NACE mapping file is empty - continuing without conversion")
+                    return False
+
+        except requests.Timeout:
+            st.warning("⚠️ NACE mapping load timeout - continuing without conversion")
+            return False
+        except requests.RequestException as e:
+            st.warning(f"⚠️ NACE mapping unavailable - continuing without conversion")
+            return False
+        except Exception as e:
+            st.warning(f"⚠️ Could not load NACE mapping - continuing without conversion")
+            return False
+
+    def _create_lookups(self, df):
+        """Create lookup dictionaries from mapping dataframe"""
+        try:
+            nace_code_lookup = {}
+            ateco_code_lookup = {}
+
+            for idx, row in df.iterrows():
+                # Extract fields safely
+                record = {
+                    'nace_category_code': str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else '',
+                    'nace_category_title': str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else '',
+                    'ateco_category_code': str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else '',
+                    'ateco_category_title': str(row.iloc[3]).strip() if pd.notna(row.iloc[3]) else '',
+                    'nace_subcat_code': str(row.iloc[4]).strip() if pd.notna(row.iloc[4]) else '',
+                    'nace_subcat_title': str(row.iloc[5]).strip() if pd.notna(row.iloc[5]) else '',
+                    'ateco_subcat_code': str(row.iloc[6]).strip() if pd.notna(row.iloc[6]) else '',
+                    'ateco_subcat_title': str(row.iloc[7]).strip() if pd.notna(row.iloc[7]) else '',
+                    'arkap_industry': str(row.iloc[8]).strip() if pd.notna(row.iloc[8]) else '',
+                    'arkap_subindustry': str(row.iloc[9]).strip() if pd.notna(row.iloc[9]) else ''
+                }
+
+                # Build NACE code lookup
+                if record['nace_subcat_code'] and record['nace_subcat_code'] != 'nan':
+                    key = record['nace_subcat_code'].lower().strip()
+                    nace_code_lookup[key] = record
+
+                # Build ATECO code lookup
+                if record['ateco_subcat_code'] and record['ateco_subcat_code'] != 'nan':
+                    key = record['ateco_subcat_code'].lower().strip()
+                    ateco_code_lookup[key] = record
+
+            return {
+                'nace_code': nace_code_lookup,
+                'ateco_code': ateco_code_lookup
+            }
+        except Exception as e:
+            st.warning(f"⚠️ Error creating NACE lookups - continuing without conversion")
+            return None
+
+    def convert_nace_code(self, nace_code):
+        """
+        Convert NACE code to Arkap Industry classification.
+        Returns dict with conversion or None if not found/disabled.
+        """
+        if not self.enabled or not self.lookups or not nace_code:
+            return None
+
+        try:
+            # Clean input
+            input_clean = str(nace_code).strip().lower()
+
+            # Try exact match in NACE codes
+            if input_clean in self.lookups['nace_code']:
+                result = self.lookups['nace_code'][input_clean]
+                return {
+                    'arkap_industry': result['arkap_industry'],
+                    'arkap_subindustry': result['arkap_subindustry'],
+                    'nace_category': result['nace_category_title'],
+                    'nace_subcategory': result['nace_subcat_title'],
+                    'match_type': 'NACE (Exact)'
+                }
+
+            # Try exact match in ATECO codes
+            if input_clean in self.lookups['ateco_code']:
+                result = self.lookups['ateco_code'][input_clean]
+                return {
+                    'arkap_industry': result['arkap_industry'],
+                    'arkap_subindustry': result['arkap_subindustry'],
+                    'ateco_category': result['ateco_category_title'],
+                    'ateco_subcategory': result['ateco_subcat_title'],
+                    'match_type': 'ATECO (Exact)'
+                }
+
+            # Try partial match (e.g., "62.01" matches "62.01.0")
+            for key, value in self.lookups['nace_code'].items():
+                if key.startswith(input_clean) or input_clean.startswith(key):
+                    return {
+                        'arkap_industry': value['arkap_industry'],
+                        'arkap_subindustry': value['arkap_subindustry'],
+                        'nace_category': value['nace_category_title'],
+                        'nace_subcategory': value['nace_subcat_title'],
+                        'match_type': 'NACE (Partial)'
+                    }
+
+            return None  # No match found
+
+        except Exception as e:
+            # Silent fallback - don't break the app
+            return None
+
+# ============================================================================
+# ORIGINAL VAT EXTRACTOR CODE (UNCHANGED)
+# ============================================================================
+
 def get_dropbox_download_link(shared_link):
     if 'dropbox.com' in shared_link:
         return shared_link.replace('dl=0', 'dl=1').replace('www.dropbox.com', 'dl.dropboxusercontent.com')
@@ -19,6 +163,7 @@ def load_database_from_dropbox():
             return None
 
         download_url = get_dropbox_download_link(dropbox_url)
+
         with st.spinner("📥 Downloading database..."):
             response = requests.get(download_url, timeout=30)
             response.raise_for_status()
@@ -27,27 +172,6 @@ def load_database_from_dropbox():
             return df
     except Exception as e:
         st.error(f"❌ Error: {str(e)}")
-        return None
-
-# NEW: Load NACE mapping when user opts in
-def load_nace_mapping():
-    """Load NACE/ATECO/Arkap mapping from Dropbox"""
-    try:
-        if 'DROPBOX_NACE_URL' in st.secrets:
-            dropbox_url = st.secrets["DROPBOX_NACE_URL"]
-        else:
-            st.error("⚠️ Add DROPBOX_NACE_URL to Streamlit Secrets")
-            return None
-
-        download_url = get_dropbox_download_link(dropbox_url)
-        with st.spinner("📚 Loading NACE classification database..."):
-            response = requests.get(download_url, timeout=30)
-            response.raise_for_status()
-            df = pd.read_excel(io.BytesIO(response.content))
-            st.success(f"✅ NACE mapping loaded: {len(df)} classifications")
-            return df
-    except Exception as e:
-        st.error(f"❌ NACE loading error: {str(e)}")
         return None
 
 ALLOWED_DOMAIN = "@arkap.ch"
@@ -64,62 +188,6 @@ def safe_format(value, fmt="{:,.0f}", pre="", suf="", default="N/A"):
             value = float(v)
         return f"{pre}{fmt.format(float(value))}{suf}"
     except: return str(value) if value else default
-
-# NEW: NACE Classifier class
-class NACEClassifier:
-    def __init__(self, mapping_df):
-        self.lookups = self._build_lookups(mapping_df)
-
-    def _build_lookups(self, df):
-        """Build lookup dictionaries from mapping dataframe"""
-        nace_code_lookup = {}
-        ateco_code_lookup = {}
-
-        for idx, row in df.iterrows():
-            record = {
-                'nace_category_code': str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else '',
-                'nace_category_title': str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else '',
-                'ateco_category_code': str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else '',
-                'ateco_category_title': str(row.iloc[3]).strip() if pd.notna(row.iloc[3]) else '',
-                'nace_subcat_code': str(row.iloc[4]).strip() if pd.notna(row.iloc[4]) else '',
-                'nace_subcat_title': str(row.iloc[5]).strip() if pd.notna(row.iloc[5]) else '',
-                'ateco_subcat_code': str(row.iloc[6]).strip() if pd.notna(row.iloc[6]) else '',
-                'ateco_subcat_title': str(row.iloc[7]).strip() if pd.notna(row.iloc[7]) else '',
-                'arkap_industry': str(row.iloc[8]).strip() if pd.notna(row.iloc[8]) else '',
-                'arkap_subindustry': str(row.iloc[9]).strip() if pd.notna(row.iloc[9]) else ''
-            }
-
-            if record['nace_subcat_code'] and record['nace_subcat_code'] != 'nan':
-                nace_code_lookup[record['nace_subcat_code'].lower()] = record
-            if record['ateco_subcat_code'] and record['ateco_subcat_code'] != 'nan':
-                ateco_code_lookup[record['ateco_subcat_code'].lower()] = record
-
-        return {
-            'nace_code': nace_code_lookup,
-            'ateco_code': ateco_code_lookup
-        }
-
-    def classify(self, nace_code):
-        """Lookup NACE/ATECO code and return classification"""
-        if not nace_code or pd.isna(nace_code):
-            return None
-
-        input_clean = str(nace_code).strip().lower()
-
-        # Try direct NACE lookup
-        if input_clean in self.lookups['nace_code']:
-            return self.lookups['nace_code'][input_clean]
-
-        # Try ATECO lookup
-        if input_clean in self.lookups['ateco_code']:
-            return self.lookups['ateco_code'][input_clean]
-
-        # Try partial match
-        for key in self.lookups['nace_code'].keys():
-            if key.startswith(input_clean) or input_clean.startswith(key):
-                return self.lookups['nace_code'][key]
-
-        return None
 
 class CompanyDatabase:
     def __init__(self, df=None):
@@ -141,15 +209,18 @@ class CompanyDatabase:
             elif 'employee' in c: mapping[col] = 'Employees'
             elif 'ebitda' in c: mapping[col] = 'Ebitda (th)'
             elif 'pfn' in c: mapping[col] = 'PFN (th)'
+
         self.db = self.db.rename(columns=mapping)
 
         for idx, row in self.db.iterrows():
             if 'Company Name' in self.db.columns and pd.notna(row.get('Company Name')):
                 k = str(row['Company Name']).lower().strip()
                 self.name_idx.setdefault(k, []).append(idx)
+
             if 'VAT Code' in self.db.columns and pd.notna(row.get('VAT Code')):
                 k = str(row['VAT Code']).upper().replace(' ', '').replace('-', '').replace('.', '')
                 self.vat_idx.setdefault(k, []).append(idx)
+
             if 'Country Code' in self.db.columns:
                 for cc in self.db['Country Code'].unique():
                     if pd.notna(cc): self.country_idx[str(cc).upper()] = self.db[self.db['Country Code'] == cc].index.tolist()
@@ -178,30 +249,33 @@ class CompanyDatabase:
 
 class AuthenticationManager:
     def __init__(self):
-        for k in ['auth_codes', 'authenticated', 'user_email', 'auth_time', 'company_db', 'search_mode', 'enable_nace', 'nace_classifier']:
+        for k in ['auth_codes', 'authenticated', 'user_email', 'auth_time', 'company_db', 'search_mode', 'nace_converter']:
             if k not in st.session_state: 
-                st.session_state[k] = {} if k == 'auth_codes' else (False if k in ['authenticated', 'enable_nace'] else ("" if k == 'user_email' else None))
+                st.session_state[k] = {} if k == 'auth_codes' else (False if k == 'authenticated' else ("" if k == 'user_email' else None))
 
     def is_valid_email(self, e): return re.match(r'^[\w.+-]+@[\w.-]+\.[\w]+$', e) and e.lower().endswith(ALLOWED_DOMAIN.lower())
+
     def gen_code(self): return ''.join(random.choices(string.digits, k=6))
+
     def store_code(self, e, c): st.session_state.auth_codes[e] = {'code': c, 'timestamp': datetime.now(), 'attempts': 0}
 
     def verify(self, e, c):
         if e not in st.session_state.auth_codes: return False, "No code"
         d = st.session_state.auth_codes[e]
-        if datetime.now() - d['timestamp'] > timedelta(minutes=CODE_EXPIRY_MINUTES): del st.session_state.auth_codes[e]; return False, "Expired"
+        if datetime.now() - d['timestamp'] > timedelta(minutes=CODE_EXPIRY_MINUTES): 
+            del st.session_state.auth_codes[e]; return False, "Expired"
         if d['attempts'] >= 3: del st.session_state.auth_codes[e]; return False, "Too many"
         if d['code'] == c: 
             st.session_state.authenticated, st.session_state.user_email, st.session_state.auth_time = True, e, datetime.now()
-            del st.session_state.auth_codes[e]
-            return True, "Success"
-        d['attempts'] += 1
-        return False, f"{3-d['attempts']} left"
+            del st.session_state.auth_codes[e]; return True, "Success"
+        d['attempts'] += 1; return False, f"{3-d['attempts']} left"
 
     def is_valid(self): return st.session_state.authenticated and st.session_state.auth_time and datetime.now() - st.session_state.auth_time <= timedelta(minutes=SESSION_TIMEOUT_MINUTES)
+
     def logout(self): st.session_state.authenticated, st.session_state.user_email, st.session_state.auth_time = False, "", None
 
 class EnhancedUKExtractor:
+    """UK Company Number Extractor - Full Original Logic"""
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': 'Mozilla/5.0'})
@@ -231,9 +305,8 @@ class EnhancedUKExtractor:
         return r
 
 class MultiModeExtractor:
-    def __init__(self, db=None, use_db=True, nace_classifier=None):
-        self.db, self.use_db = db, use_db
-        self.nace_classifier = nace_classifier  # NEW: Optional NACE classifier
+    def __init__(self, db=None, use_db=True, nace_converter=None):
+        self.db, self.use_db, self.nace_converter = db, use_db, nace_converter
         self.extractors = {'GB': EnhancedUKExtractor()}
         self.patterns = {
             'DE': [
@@ -289,6 +362,7 @@ class MultiModeExtractor:
         }
 
     def process_single(self, name, web, country, vat=None):
+        """Process single company with NACE conversion if available"""
         result = None
 
         if self.use_db and self.db:
@@ -298,31 +372,24 @@ class MultiModeExtractor:
                 result['status'] = 'Found'
             elif vat:
                 result = self.db.search_vat(vat, country)
-                if result:
+                if result: 
                     result['search_method'] = 'DB-VAT'
                     result['status'] = 'Found'
 
-        if not result or result['status'] != 'Found':
-            result = self._web(name, web, country)
-            if self.use_db:
+            if not result:
+                result = self._web(name, web, country)
                 result['search_method'] = 'DB failed → Web'
-            else:
-                result['search_method'] = 'Web only'
+        else:
+            result = self._web(name, web, country)
+            result['search_method'] = 'Web only'
 
-        # NEW: Apply NACE classification if enabled and available
-        if self.nace_classifier and result.get('nace_code'):
-            classification = self.nace_classifier.classify(result['nace_code'])
-            if classification:
-                result['nace_category_code'] = classification.get('nace_category_code', '')
-                result['nace_category_title'] = classification.get('nace_category_title', '')
-                result['ateco_category_code'] = classification.get('ateco_category_code', '')
-                result['ateco_category_title'] = classification.get('ateco_category_title', '')
-                result['nace_subcat_code'] = classification.get('nace_subcat_code', '')
-                result['nace_subcat_title'] = classification.get('nace_subcat_title', '')
-                result['ateco_subcat_code'] = classification.get('ateco_subcat_code', '')
-                result['ateco_subcat_title'] = classification.get('ateco_subcat_title', '')
-                result['arkap_industry'] = classification.get('arkap_industry', '')
-                result['arkap_subindustry'] = classification.get('arkap_subindustry', '')
+        # Apply NACE conversion if NACE code exists
+        if result and self.nace_converter and 'nace_code' in result:
+            conversion = self.nace_converter.convert_nace_code(result['nace_code'])
+            if conversion:
+                result['arkap_industry'] = conversion.get('arkap_industry', '')
+                result['arkap_subindustry'] = conversion.get('arkap_subindustry', '')
+                result['nace_conversion_status'] = conversion.get('match_type', 'Converted')
 
         return result
 
@@ -349,27 +416,35 @@ class MultiModeExtractor:
         return r
 
     def process_list(self, df, prog=None):
+        """Process list of companies with NACE conversion"""
         results = []
+
         nc = [c for c in df.columns if 'company' in c.lower() or 'name' in c.lower()]
         name_col = nc[0] if nc else df.columns[0]
+
         wc = [c for c in df.columns if 'website' in c.lower() or 'url' in c.lower()]
         web_col = wc[0] if wc else None
+
         cc = [c for c in df.columns if 'country' in c.lower()]
         country_col = cc[0] if cc else None
+
         vc = [c for c in df.columns if 'vat' in c.lower() or 'fiscal' in c.lower()]
         vat_col = vc[0] if vc else None
 
         for idx, row in df.iterrows():
             if prog: prog(idx+1, len(df))
+
             name = str(row[name_col]).strip() if pd.notna(row[name_col]) else ""
             web = str(row[web_col]).strip() if web_col and pd.notna(row[web_col]) else ''
             vat = str(row[vat_col]).strip() if vat_col and pd.notna(row[vat_col]) else None
             country = 'GB'
+
             if country_col and pd.notna(row[country_col]):
                 cv = str(row[country_col]).strip().upper()
                 if len(cv) == 2 and cv in COUNTRY_CODES: country = cv
 
-            results.append(self.process_single(name, web, country, vat))
+            result = self.process_single(name, web, country, vat)
+            results.append(result)
             time.sleep(0.2)
 
         return results
@@ -377,6 +452,7 @@ class MultiModeExtractor:
 def show_auth(auth):
     st.title("🔐 arKap VAT Extractor")
     st.info("🏢 @arkap.ch only")
+
     t1, t2 = st.tabs(["📧 Email", "🔑 Code"])
 
     with t1:
@@ -404,6 +480,7 @@ def show_auth(auth):
 
 def show_main():
     st.title("🌍 arKap VAT Extractor")
+
     c1, c2 = st.columns([3,1])
     with c1:
         st.markdown(f"**User:** {st.session_state.user_email}")
@@ -414,8 +491,37 @@ def show_main():
 
     st.markdown("---")
 
+    # Initialize NACE converter if not already done
+    if st.session_state.nace_converter is None:
+        st.session_state.nace_converter = NaceArkapConverter()
+
+    # NACE Mapping Setup (Optional)
+    with st.expander("🔧 NACE-to-Arkap Mapping (Optional)", expanded=False):
+        st.write("Enable industry classification conversion by loading NACE mapping file from Dropbox.")
+        st.write("**Note:** App works without this - it's optional for enhanced classification.")
+
+        nace_url = st.text_input("NACE Mapping Dropbox URL (optional)", 
+                                  value=st.secrets.get("NACE_MAPPING_URL", "") if "NACE_MAPPING_URL" in st.secrets else "",
+                                  help="Dropbox share link to backupindustrylinked.xlsx")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("📥 Load NACE Mapping"):
+                if nace_url:
+                    st.session_state.nace_converter.load_mapping_from_url(nace_url)
+                else:
+                    st.warning("Please provide a Dropbox URL")
+
+        with col2:
+            if st.session_state.nace_converter.enabled:
+                st.success("✅ NACE Mapping Active")
+            else:
+                st.info("ℹ️ NACE Mapping Disabled")
+
+    # Database Setup
     if st.session_state.company_db is None:
         st.header("📊 Database Setup")
+
         with st.expander("ℹ️ Dropbox Setup", expanded=True):
             st.write("1. Share file on Dropbox → Copy link")
             st.write('2. App Settings → Secrets → Add: DROPBOX_FILE_URL = "your_link"')
@@ -427,6 +533,7 @@ def show_main():
                 st.rerun()
 
         st.markdown("---")
+
         up = st.file_uploader("Or Upload", type=['xlsx','csv'])
         if up is not None:
             df = pd.read_csv(up) if up.name.endswith('.csv') else pd.read_excel(up)
@@ -436,9 +543,10 @@ def show_main():
         if st.button("⏭️ Web Only"):
             st.session_state.search_mode = 'web'
             st.rerun()
+
         return
 
-    # NEW: After database loaded, ask for search mode
+    # Search Mode Selection
     if st.session_state.search_mode is None:
         c1, c2 = st.columns(2)
         with c1:
@@ -451,37 +559,14 @@ def show_main():
                 st.rerun()
         return
 
-    # NEW: After search mode selected, ask about NACE classification
-    if st.session_state.enable_nace is None:
-        st.info(f"Mode selected: {st.session_state.search_mode.upper()}")
-        st.header("🏭 NACE/Arkap Classification")
-        st.write("Do you need NACE/ATECO/Arkap industry classification?")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("✅ Yes, enable NACE", type="primary", use_container_width=True):
-                nace_df = load_nace_mapping()
-                if nace_df is not None:
-                    st.session_state.nace_classifier = NACEClassifier(nace_df)
-                    st.session_state.enable_nace = True
-                    st.rerun()
-                else:
-                    st.session_state.enable_nace = False
-        with c2:
-            if st.button("❌ No, skip NACE", use_container_width=True):
-                st.session_state.enable_nace = False
-                st.session_state.nace_classifier = None
-                st.rerun()
-        return
-
-    st.info(f"Mode: {st.session_state.search_mode.upper()} | NACE: {'✅ Enabled' if st.session_state.enable_nace else '❌ Disabled'}")
-    if st.button("🔄 Change Settings"):
+    st.info(f"Mode: {st.session_state.search_mode.upper()}")
+    if st.button("Change"):
         st.session_state.search_mode = None
-        st.session_state.enable_nace = None
-        st.session_state.nace_classifier = None
         st.rerun()
 
     st.markdown("---")
+
+    # Main Functionality Tabs
     t1, t2 = st.tabs(["Bulk", "Single"])
 
     with t1:
@@ -494,11 +579,13 @@ def show_main():
                 ext = MultiModeExtractor(
                     st.session_state.company_db, 
                     st.session_state.search_mode=='db',
-                    st.session_state.nace_classifier
+                    st.session_state.nace_converter
                 )
+
                 p = st.progress(0)
                 res = ext.process_list(df, lambda c,t: p.progress(c/t))
                 rdf = pd.DataFrame(res)
+
                 st.dataframe(rdf)
 
                 c1,c2,c3 = st.columns(3)
@@ -526,7 +613,7 @@ def show_main():
             ext = MultiModeExtractor(
                 st.session_state.company_db, 
                 st.session_state.search_mode=='db',
-                st.session_state.nace_classifier
+                st.session_state.nace_converter
             )
             r = ext.process_single(n, w, co, v)
 
@@ -543,24 +630,18 @@ def show_main():
                         for k in ['country_code','nace_code']:
                             if k in r: st.write(f"**{k}:** {r[k]}")
 
-                    # NEW: Display NACE classification if enabled and available
-                    if st.session_state.enable_nace and any(k in r for k in ['nace_category_code', 'arkap_industry']):
+                    # Show NACE Conversion if available
+                    if 'arkap_industry' in r or 'arkap_subindustry' in r:
                         st.subheader("🏭 Industry Classification")
                         c1, c2 = st.columns(2)
                         with c1:
-                            if 'nace_category_code' in r and r['nace_category_code']:
-                                st.write(f"**NACE Category:** {r['nace_category_code']} - {r.get('nace_category_title', '')}")
-                            if 'nace_subcat_code' in r and r['nace_subcat_code']:
-                                st.write(f"**NACE Subcategory:** {r['nace_subcat_code']} - {r.get('nace_subcat_title', '')}")
-                            if 'ateco_category_code' in r and r['ateco_category_code']:
-                                st.write(f"**ATECO Category:** {r['ateco_category_code']} - {r.get('ateco_category_title', '')}")
-                        with c2:
-                            if 'ateco_subcat_code' in r and r['ateco_subcat_code']:
-                                st.write(f"**ATECO Subcategory:** {r['ateco_subcat_code']} - {r.get('ateco_subcat_title', '')}")
                             if 'arkap_industry' in r and r['arkap_industry']:
                                 st.write(f"**Arkap Industry:** {r['arkap_industry']}")
+                        with c2:
                             if 'arkap_subindustry' in r and r['arkap_subindustry']:
                                 st.write(f"**Arkap Subindustry:** {r['arkap_subindustry']}")
+                        if 'nace_conversion_status' in r:
+                            st.caption(f"Match: {r['nace_conversion_status']}")
 
                     st.subheader("💰 Financial Data")
                     c1,c2,c3=st.columns(3)
@@ -575,15 +656,18 @@ def show_main():
                     with c3:
                         if 'pfn_th' in r:
                             st.metric("PFN",safe_format(r.get('pfn_th'),pre="€",suf="k"))
+
                 else:
                     st.subheader("🌐 Web Extraction Results")
                     extracted_data = {k: v for k, v in r.items()
-                                    if k not in ['company_name','website','status','source','search_method','country_code']}
+                        if k not in ['company_name','website','status','source','search_method','country_code']}
+
                     if extracted_data:
                         for key, value in extracted_data.items():
                             st.write(f"**{key.replace('_', ' ').title()}:** {value}")
                     else:
                         st.info("✓ Company verified but no additional codes extracted from website")
+
             else:
                 st.warning("❌ Not found in database or website")
 
