@@ -29,23 +29,41 @@ def load_database_from_dropbox():
         st.error(f"❌ Error: {str(e)}")
         return None
 
-# NEW: Load NACE/ATECO/Arkap mapping database from Dropbox using secret
-def load_nace_mapping_from_dropbox():
+# NEW: Lazy load NACE mapping - only when actually needed
+def get_nace_classifier():
+    """Lazy load NACE classifier - only loads once when first needed"""
+    # Check if already attempted to load
+    if 'nace_load_attempted' not in st.session_state:
+        st.session_state.nace_load_attempted = False
+
+    # Check if already loaded
+    if 'nace_classifier' not in st.session_state:
+        st.session_state.nace_classifier = None
+
+    # If already attempted (success or fail), return cached result
+    if st.session_state.nace_load_attempted:
+        return st.session_state.nace_classifier
+
+    # First attempt - try to load
+    st.session_state.nace_load_attempted = True
+
     try:
         if 'DROPBOX_NACE_URL' in st.secrets:
             dropbox_url = st.secrets["DROPBOX_NACE_URL"]
-        else:
-            st.warning("⚠️ Add DROPBOX_NACE_URL to Streamlit Secrets for NACE classification")
-            return None
+            download_url = get_dropbox_download_link(dropbox_url)
 
-        download_url = get_dropbox_download_link(dropbox_url)
-        response = requests.get(download_url, timeout=30)
-        response.raise_for_status()
-        df = pd.read_excel(io.BytesIO(response.content))
-        return df
-    except Exception as e:
-        st.warning(f"⚠️ NACE mapping not loaded: {str(e)}")
-        return None
+            response = requests.get(download_url, timeout=30)
+            response.raise_for_status()
+            df = pd.read_excel(io.BytesIO(response.content))
+
+            st.session_state.nace_classifier = NACEClassifier(df)
+            return st.session_state.nace_classifier
+    except:
+        pass
+
+    # If failed, return None
+    st.session_state.nace_classifier = None
+    return None
 
 ALLOWED_DOMAIN = "@arkap.ch"
 CODE_EXPIRY_MINUTES = 10
@@ -188,7 +206,7 @@ class CompanyDatabase:
 
 class AuthenticationManager:
     def __init__(self):
-        for k in ['auth_codes', 'authenticated', 'user_email', 'auth_time', 'company_db', 'search_mode', 'nace_classifier']:
+        for k in ['auth_codes', 'authenticated', 'user_email', 'auth_time', 'company_db', 'search_mode']:
             if k not in st.session_state: 
                 st.session_state[k] = {} if k == 'auth_codes' else (False if k == 'authenticated' else ("" if k == 'user_email' else None))
 
@@ -242,9 +260,8 @@ class EnhancedUKExtractor:
         return r
 
 class MultiModeExtractor:
-    def __init__(self, db=None, use_db=True, nace_classifier=None):
+    def __init__(self, db=None, use_db=True):
         self.db, self.use_db = db, use_db
-        self.nace_classifier = nace_classifier  # NEW: Add NACE classifier
         self.extractors = {'GB': EnhancedUKExtractor()}
         self.patterns = {
             'DE': [
@@ -320,11 +337,12 @@ class MultiModeExtractor:
             else:
                 result['search_method'] = 'Web only'
 
-        # NEW: Add NACE classification if available
-        if result and self.nace_classifier:
-            nace_code = result.get('nace_code')
-            if nace_code:
-                classification = self.nace_classifier.classify(nace_code)
+        # NEW: Add NACE classification if available (lazy load)
+        nace_code = result.get('nace_code')
+        if nace_code:
+            nace_classifier = get_nace_classifier()
+            if nace_classifier:
+                classification = nace_classifier.classify(nace_code)
                 if classification:
                     result['nace_category_code'] = classification.get('nace_category_code', '')
                     result['nace_category_title'] = classification.get('nace_category_title', '')
@@ -427,13 +445,7 @@ def show_main():
 
     st.markdown("---")
 
-    # Load NACE classifier if not already loaded
-    if st.session_state.nace_classifier is None:
-        with st.spinner("📚 Loading NACE/ATECO/Arkap classification database..."):
-            nace_df = load_nace_mapping_from_dropbox()
-            if nace_df is not None:
-                st.session_state.nace_classifier = NACEClassifier(nace_df)
-                st.success("✅ NACE classification system loaded")
+    # NO NACE LOADING HERE - It's now lazy loaded when needed
 
     if st.session_state.company_db is None:
         st.header("📊 Database Setup")
@@ -441,6 +453,7 @@ def show_main():
             st.write("1. Share file on Dropbox → Copy link")
             st.write('2. App Settings → Secrets → Add:')
             st.code('DROPBOX_FILE_URL = "your_company_database_link"\nDROPBOX_NACE_URL = "your_nace_mapping_link"')
+            st.write("Note: NACE classification is optional and will be loaded automatically when needed.")
 
         if st.button("📥 Load from Dropbox", type="primary"):
             df = load_database_from_dropbox()
@@ -489,8 +502,7 @@ def show_main():
             if st.button("Process"):
                 ext = MultiModeExtractor(
                     st.session_state.company_db, 
-                    st.session_state.search_mode=='db',
-                    st.session_state.nace_classifier  # NEW: Pass NACE classifier
+                    st.session_state.search_mode=='db'
                 )
                 p = st.progress(0)
                 res = ext.process_list(df, lambda c,t: p.progress(c/t))
@@ -521,8 +533,7 @@ def show_main():
         if st.button("Search") and n:
             ext = MultiModeExtractor(
                 st.session_state.company_db, 
-                st.session_state.search_mode=='db',
-                st.session_state.nace_classifier  # NEW: Pass NACE classifier
+                st.session_state.search_mode=='db'
             )
             r = ext.process_single(n, w, co, v)
 
