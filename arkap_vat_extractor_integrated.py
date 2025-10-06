@@ -17,7 +17,7 @@ def load_database_from_dropbox():
         else:
             st.warning("⚠️ Add DROPBOX_FILE_URL to Streamlit Secrets")
             return None
-        
+
         download_url = get_dropbox_download_link(dropbox_url)
         with st.spinner("📥 Downloading database..."):
             response = requests.get(download_url, timeout=30)
@@ -29,12 +29,16 @@ def load_database_from_dropbox():
         st.error(f"❌ Error: {str(e)}")
         return None
 
-# NEW: Load NACE/ATECO/Arkap mapping database from Dropbox
+# NEW: Load NACE/ATECO/Arkap mapping database from Dropbox using secret
 def load_nace_mapping_from_dropbox():
     try:
-        dropbox_url = "https://www.dropbox.com/scl/fi/fa1h95tqe1b90k8lmqbp2/backupindustrylinked.xlsx?rlkey=nwjajpjdo8n9dixmxwhd31nji&st=9rugbabf&dl=0"
+        if 'DROPBOX_NACE_URL' in st.secrets:
+            dropbox_url = st.secrets["DROPBOX_NACE_URL"]
+        else:
+            st.warning("⚠️ Add DROPBOX_NACE_URL to Streamlit Secrets for NACE classification")
+            return None
+
         download_url = get_dropbox_download_link(dropbox_url)
-        
         response = requests.get(download_url, timeout=30)
         response.raise_for_status()
         df = pd.read_excel(io.BytesIO(response.content))
@@ -64,14 +68,14 @@ class NACEClassifier:
         self.lookups = None
         if mapping_df is not None:
             self._init_lookups(mapping_df)
-    
+
     def _init_lookups(self, df):
         """Initialize lookup dictionaries from mapping dataframe"""
         nace_code_lookup = {}
         nace_title_lookup = {}
         ateco_code_lookup = {}
         ateco_title_lookup = {}
-        
+
         for idx, row in df.iterrows():
             record = {
                 'nace_category_code': str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else '',
@@ -85,7 +89,7 @@ class NACEClassifier:
                 'arkap_industry': str(row.iloc[8]).strip() if pd.notna(row.iloc[8]) else '',
                 'arkap_subindustry': str(row.iloc[9]).strip() if pd.notna(row.iloc[9]) else ''
             }
-            
+
             if record['nace_subcat_code'] and record['nace_subcat_code'] != 'nan':
                 nace_code_lookup[record['nace_subcat_code'].lower()] = record
             if record['nace_subcat_title'] and record['nace_subcat_title'] != 'nan':
@@ -94,44 +98,44 @@ class NACEClassifier:
                 ateco_code_lookup[record['ateco_subcat_code'].lower()] = record
             if record['ateco_subcat_title'] and record['ateco_subcat_title'] != 'nan':
                 ateco_title_lookup[record['ateco_subcat_title'].lower()] = record
-        
+
         self.lookups = {
             'nace_code': nace_code_lookup,
             'nace_title': nace_title_lookup,
             'ateco_code': ateco_code_lookup,
             'ateco_title': ateco_title_lookup
         }
-    
+
     def classify(self, nace_code):
         """Lookup NACE code and return classification"""
         if self.lookups is None:
             return None
-        
+
         if not nace_code or pd.isna(nace_code):
             return None
-        
+
         input_clean = str(nace_code).strip().lower()
-        
+
         # Try NACE code lookup
         if input_clean in self.lookups['nace_code']:
             return self.lookups['nace_code'][input_clean]
-        
+
         # Try ATECO code lookup
         if input_clean in self.lookups['ateco_code']:
             return self.lookups['ateco_code'][input_clean]
-        
+
         # Try partial match for NACE codes
         for key in self.lookups['nace_code'].keys():
             if key.startswith(input_clean) or input_clean.startswith(key):
                 return self.lookups['nace_code'][key]
-        
+
         return None
 
 class CompanyDatabase:
     def __init__(self, df=None):
         self.db, self.name_idx, self.vat_idx, self.country_idx = df, {}, {}, {}
         if df is not None: self._init()
-    
+
     def _init(self):
         mapping = {}
         for col in self.db.columns:
@@ -148,7 +152,7 @@ class CompanyDatabase:
             elif 'ebitda' in c: mapping[col] = 'Ebitda (th)'
             elif 'pfn' in c: mapping[col] = 'PFN (th)'
         self.db = self.db.rename(columns=mapping)
-        
+
         for idx, row in self.db.iterrows():
             if 'Company Name' in self.db.columns and pd.notna(row.get('Company Name')):
                 k = str(row['Company Name']).lower().strip()
@@ -159,7 +163,7 @@ class CompanyDatabase:
             if 'Country Code' in self.db.columns:
                 for cc in self.db['Country Code'].unique():
                     if pd.notna(cc): self.country_idx[str(cc).upper()] = self.db[self.db['Country Code'] == cc].index.tolist()
-    
+
     def search_name(self, name, country=None):
         k = name.lower().strip()
         if k in self.name_idx:
@@ -167,7 +171,7 @@ class CompanyDatabase:
             if country and country in self.country_idx: idxs = [i for i in idxs if i in self.country_idx[country]]
             return self._extract(self.db.iloc[idxs[0]]) if idxs else None
         return None
-    
+
     def search_vat(self, vat, country=None):
         k = str(vat).upper().replace(' ', '').replace('-', '').replace('.', '')
         if k in self.vat_idx:
@@ -175,7 +179,7 @@ class CompanyDatabase:
             if country and country in self.country_idx: idxs = [i for i in idxs if i in self.country_idx[country]]
             return self._extract(self.db.iloc[idxs[0]]) if idxs else None
         return None
-    
+
     def _extract(self, row):
         d = {'source': 'database'}
         for f in ['Company Name', 'National ID', 'Fiscal Code', 'VAT Code', 'Country Code', 'Nace Code', 'Last Yr', 'Value of production (th)', 'Employees', 'Ebitda (th)', 'PFN (th)']:
@@ -187,11 +191,11 @@ class AuthenticationManager:
         for k in ['auth_codes', 'authenticated', 'user_email', 'auth_time', 'company_db', 'search_mode', 'nace_classifier']:
             if k not in st.session_state: 
                 st.session_state[k] = {} if k == 'auth_codes' else (False if k == 'authenticated' else ("" if k == 'user_email' else None))
-    
+
     def is_valid_email(self, e): return re.match(r'^[\w.+-]+@[\w.-]+\.[\w]+$', e) and e.lower().endswith(ALLOWED_DOMAIN.lower())
     def gen_code(self): return ''.join(random.choices(string.digits, k=6))
     def store_code(self, e, c): st.session_state.auth_codes[e] = {'code': c, 'timestamp': datetime.now(), 'attempts': 0}
-    
+
     def verify(self, e, c):
         if e not in st.session_state.auth_codes: return False, "No code"
         d = st.session_state.auth_codes[e]
@@ -203,7 +207,7 @@ class AuthenticationManager:
             return True, "Success"
         d['attempts'] += 1
         return False, f"{3-d['attempts']} left"
-    
+
     def is_valid(self): return st.session_state.authenticated and st.session_state.auth_time and datetime.now() - st.session_state.auth_time <= timedelta(minutes=SESSION_TIMEOUT_MINUTES)
     def logout(self): st.session_state.authenticated, st.session_state.user_email, st.session_state.auth_time = False, "", None
 
@@ -219,7 +223,7 @@ class EnhancedUKExtractor:
             r'([0-9]{8})\s*(?:Company|Registered)',
             r'\b([0-9]{8})\b'
         ]
-    
+
     def process(self, name, url=None):
         r = {'company_name': name, 'website': url or '', 'status': 'Not Found', 'source': 'web'}
         if url:
@@ -294,10 +298,10 @@ class MultiModeExtractor:
                 r'L\.?U\.?R[\s#:]*([0-9]{6})'
             ]
         }
-    
+
     def process_single(self, name, web, country, vat=None):
         result = None
-        
+
         if self.use_db and self.db:
             result = self.db.search_name(name, country)
             if result: 
@@ -308,14 +312,14 @@ class MultiModeExtractor:
                 if result:
                     result['search_method'] = 'DB-VAT'
                     result['status'] = 'Found'
-        
+
         if not result or result['status'] != 'Found':
             result = self._web(name, web, country)
             if self.use_db:
                 result['search_method'] = 'DB failed → Web'
             else:
                 result['search_method'] = 'Web only'
-        
+
         # NEW: Add NACE classification if available
         if result and self.nace_classifier:
             nace_code = result.get('nace_code')
@@ -332,13 +336,13 @@ class MultiModeExtractor:
                     result['ateco_subcat_title'] = classification.get('ateco_subcat_title', '')
                     result['arkap_industry'] = classification.get('arkap_industry', '')
                     result['arkap_subindustry'] = classification.get('arkap_subindustry', '')
-        
+
         return result
-    
+
     def _web(self, name, web, country):
         if country in self.extractors:
             return self.extractors[country].process(name, web)
-        
+
         r = {'company_name': name, 'website': web, 'country_code': country, 'status': 'Not Found', 'source': 'web'}
         if web and country in self.patterns:
             try:
@@ -356,7 +360,7 @@ class MultiModeExtractor:
                             return r
             except: pass
         return r
-    
+
     def process_list(self, df, prog=None):
         results = []
         nc = [c for c in df.columns if 'company' in c.lower() or 'name' in c.lower()]
@@ -367,7 +371,7 @@ class MultiModeExtractor:
         country_col = cc[0] if cc else None
         vc = [c for c in df.columns if 'vat' in c.lower() or 'fiscal' in c.lower()]
         vat_col = vc[0] if vc else None
-        
+
         for idx, row in df.iterrows():
             if prog: prog(idx+1, len(df))
             name = str(row[name_col]).strip() if pd.notna(row[name_col]) else ""
@@ -377,17 +381,17 @@ class MultiModeExtractor:
             if country_col and pd.notna(row[country_col]):
                 cv = str(row[country_col]).strip().upper()
                 if len(cv) == 2 and cv in COUNTRY_CODES: country = cv
-            
+
             results.append(self.process_single(name, web, country, vat))
             time.sleep(0.2)
-        
+
         return results
 
 def show_auth(auth):
     st.title("🔐 arKap VAT Extractor")
     st.info("🏢 @arkap.ch only")
     t1, t2 = st.tabs(["📧 Email", "🔑 Code"])
-    
+
     with t1:
         e = st.text_input("Email")
         if st.button("Send Code", type="primary"):
@@ -397,7 +401,7 @@ def show_auth(auth):
                 st.success(f"Code: {c}")
             else:
                 st.error("Invalid")
-    
+
     with t2:
         e = st.text_input("Email", key="e2")
         c = st.text_input("Code", max_chars=6)
@@ -420,9 +424,9 @@ def show_main():
         if st.button("Logout"):
             AuthenticationManager().logout()
             st.rerun()
-    
+
     st.markdown("---")
-    
+
     # Load NACE classifier if not already loaded
     if st.session_state.nace_classifier is None:
         with st.spinner("📚 Loading NACE/ATECO/Arkap classification database..."):
@@ -430,31 +434,32 @@ def show_main():
             if nace_df is not None:
                 st.session_state.nace_classifier = NACEClassifier(nace_df)
                 st.success("✅ NACE classification system loaded")
-    
+
     if st.session_state.company_db is None:
         st.header("📊 Database Setup")
         with st.expander("ℹ️ Dropbox Setup", expanded=True):
             st.write("1. Share file on Dropbox → Copy link")
-            st.write('2. App Settings → Secrets → Add: DROPBOX_FILE_URL = "your_link"')
-        
+            st.write('2. App Settings → Secrets → Add:')
+            st.code('DROPBOX_FILE_URL = "your_company_database_link"\nDROPBOX_NACE_URL = "your_nace_mapping_link"')
+
         if st.button("📥 Load from Dropbox", type="primary"):
             df = load_database_from_dropbox()
             if df is not None:
                 st.session_state.company_db = CompanyDatabase(df)
                 st.rerun()
-        
+
         st.markdown("---")
         up = st.file_uploader("Or Upload", type=['xlsx','csv'])
         if up is not None:
             df = pd.read_csv(up) if up.name.endswith('.csv') else pd.read_excel(up)
             st.session_state.company_db = CompanyDatabase(df)
             st.rerun()
-        
+
         if st.button("⏭️ Web Only"):
             st.session_state.search_mode = 'web'
             st.rerun()
         return
-    
+
     if st.session_state.search_mode is None:
         c1, c2 = st.columns(2)
         with c1:
@@ -466,21 +471,21 @@ def show_main():
                 st.session_state.search_mode = 'web'
                 st.rerun()
         return
-    
+
     st.info(f"Mode: {st.session_state.search_mode.upper()}")
     if st.button("Change"):
         st.session_state.search_mode = None
         st.rerun()
-    
+
     st.markdown("---")
     t1, t2 = st.tabs(["Bulk", "Single"])
-    
+
     with t1:
         f = st.file_uploader("Company List", type=['csv','xlsx'])
         if f:
             df = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
             st.dataframe(df.head())
-            
+
             if st.button("Process"):
                 ext = MultiModeExtractor(
                     st.session_state.company_db, 
@@ -491,7 +496,7 @@ def show_main():
                 res = ext.process_list(df, lambda c,t: p.progress(c/t))
                 rdf = pd.DataFrame(res)
                 st.dataframe(rdf)
-                
+
                 c1,c2,c3 = st.columns(3)
                 with c1:
                     st.metric("Total", len(res))
@@ -499,11 +504,11 @@ def show_main():
                     st.metric("Found", len([r for r in res if r['status']=='Found']))
                 with c3:
                     st.metric("Rate%", f"{len([r for r in res if r['status']=='Found'])/len(res)*100:.1f}")
-                
+
                 csv = io.StringIO()
                 rdf.to_csv(csv, index=False)
                 st.download_button("Download", csv.getvalue(), f"res_{datetime.now().strftime('%Y%m%d_%H%M')}.csv")
-    
+
     with t2:
         c1,c2 = st.columns(2)
         with c1:
@@ -512,7 +517,7 @@ def show_main():
             v = st.text_input("VAT")
         with c2:
             co = st.selectbox("Country", list(COUNTRY_CODES.keys()), format_func=lambda x:f"{COUNTRY_CODES[x]} ({x})")
-        
+
         if st.button("Search") and n:
             ext = MultiModeExtractor(
                 st.session_state.company_db, 
@@ -520,10 +525,10 @@ def show_main():
                 st.session_state.nace_classifier  # NEW: Pass NACE classifier
             )
             r = ext.process_single(n, w, co, v)
-            
+
             if r['status']=='Found':
                 st.success(f"✅ {r.get('search_method')}")
-                
+
                 if r.get('source')=='database':
                     st.subheader("📊 Database Results")
                     c1,c2=st.columns(2)
@@ -533,7 +538,7 @@ def show_main():
                     with c2:
                         for k in ['country_code','nace_code']:
                             if k in r: st.write(f"**{k}:** {r[k]}")
-                    
+
                     # NEW: Display NACE/ATECO/Arkap classification if available
                     if any(k in r for k in ['nace_category_code', 'arkap_industry']):
                         st.subheader("🏭 Industry Classification")
@@ -552,7 +557,7 @@ def show_main():
                                 st.write(f"**Arkap Industry:** {r['arkap_industry']}")
                             if 'arkap_subindustry' in r and r['arkap_subindustry']:
                                 st.write(f"**Arkap Subindustry:** {r['arkap_subindustry']}")
-                    
+
                     st.subheader("💰 Financial Data")
                     c1,c2,c3=st.columns(3)
                     with c1:
@@ -577,18 +582,17 @@ def show_main():
                         st.info("✓ Company verified but no additional codes extracted from website")
             else:
                 st.warning("❌ Not found in database or website")
-            
+
             with st.expander("🔍 Raw Data"):
                 st.json(r)
 
 def main():
     st.set_page_config(page_title="arKap", page_icon="⚡", layout="wide")
     auth = AuthenticationManager()
-    
+
     if auth.is_valid():
         show_main()
     else:
         show_auth(auth)
 
 if __name__ == "__main__": main()
-# -*- coding: utf-8 -*-
