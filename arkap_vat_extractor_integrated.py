@@ -146,7 +146,7 @@ class NaceArkapConverter:
             return None
 
 # ============================================================================
-# ORIGINAL VAT EXTRACTOR CODE (UNCHANGED)
+# ORIGINAL VAT EXTRACTOR CODE (WITH OPTIMIZED DATABASE LOADING)
 # ============================================================================
 
 def get_dropbox_download_link(shared_link):
@@ -168,10 +168,10 @@ def load_database_from_dropbox():
             response = requests.get(download_url, timeout=30)
             response.raise_for_status()
             df = pd.read_excel(io.BytesIO(response.content))
-            st.success(f"✅ Database loaded: {len(df)} companies")
+            st.success(f"✅ Database downloaded: {len(df)} companies")
             return df
     except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
+        st.error(f"❌ Download error: {str(e)}")
         return None
 
 ALLOWED_DOMAIN = "@arkap.ch"
@@ -190,61 +190,108 @@ def safe_format(value, fmt="{:,.0f}", pre="", suf="", default="N/A"):
     except: return str(value) if value else default
 
 class CompanyDatabase:
+    """
+    OPTIMIZED: Uses vectorized operations instead of row-by-row iteration
+    """
     def __init__(self, df=None):
-        self.db, self.name_idx, self.vat_idx, self.country_idx = df, {}, {}, {}
-        if df is not None: self._init()
+        self.db = None
+        self.name_idx = {}
+        self.vat_idx = {}
+        self.country_idx = {}
 
-    def _init(self):
-        mapping = {}
-        for col in self.db.columns:
-            c = col.lower()
-            if 'company' in c and 'name' in c: mapping[col] = 'Company Name'
-            elif 'vat' in c and 'code' in c: mapping[col] = 'VAT Code'
-            elif 'national' in c and 'id' in c: mapping[col] = 'National ID'
-            elif 'fiscal' in c: mapping[col] = 'Fiscal Code'
-            elif 'country' in c and 'code' in c: mapping[col] = 'Country Code'
-            elif 'nace' in c: mapping[col] = 'Nace Code'
-            elif 'last' in c and 'yr' in c: mapping[col] = 'Last Yr'
-            elif 'production' in c: mapping[col] = 'Value of production (th)'
-            elif 'employee' in c: mapping[col] = 'Employees'
-            elif 'ebitda' in c: mapping[col] = 'Ebitda (th)'
-            elif 'pfn' in c: mapping[col] = 'PFN (th)'
+        if df is not None:
+            self._init(df)
 
-        self.db = self.db.rename(columns=mapping)
+    def _init(self, df):
+        """FIXED: Optimized database initialization with progress feedback"""
+        try:
+            with st.spinner("🔧 Preparing database..."):
+                # Column mapping
+                mapping = {}
+                for col in df.columns:
+                    c = col.lower()
+                    if 'company' in c and 'name' in c: 
+                        mapping[col] = 'Company Name'
+                    elif 'vat' in c and 'code' in c: 
+                        mapping[col] = 'VAT Code'
+                    elif 'national' in c and 'id' in c: 
+                        mapping[col] = 'National ID'
+                    elif 'fiscal' in c: 
+                        mapping[col] = 'Fiscal Code'
+                    elif 'country' in c and 'code' in c: 
+                        mapping[col] = 'Country Code'
+                    elif 'nace' in c: 
+                        mapping[col] = 'Nace Code'
+                    elif 'last' in c and 'yr' in c: 
+                        mapping[col] = 'Last Yr'
+                    elif 'production' in c: 
+                        mapping[col] = 'Value of production (th)'
+                    elif 'employee' in c: 
+                        mapping[col] = 'Employees'
+                    elif 'ebitda' in c: 
+                        mapping[col] = 'Ebitda (th)'
+                    elif 'pfn' in c: 
+                        mapping[col] = 'PFN (th)'
 
-        for idx, row in self.db.iterrows():
-            if 'Company Name' in self.db.columns and pd.notna(row.get('Company Name')):
-                k = str(row['Company Name']).lower().strip()
-                self.name_idx.setdefault(k, []).append(idx)
+                self.db = df.rename(columns=mapping)
 
-            if 'VAT Code' in self.db.columns and pd.notna(row.get('VAT Code')):
-                k = str(row['VAT Code']).upper().replace(' ', '').replace('-', '').replace('.', '')
-                self.vat_idx.setdefault(k, []).append(idx)
+                # OPTIMIZED: Build indexes using vectorized operations
+                # Name index
+                if 'Company Name' in self.db.columns:
+                    name_series = self.db['Company Name'].dropna().astype(str).str.lower().str.strip()
+                    for idx, name in name_series.items():
+                        if name:
+                            self.name_idx.setdefault(name, []).append(idx)
 
-            if 'Country Code' in self.db.columns:
-                for cc in self.db['Country Code'].unique():
-                    if pd.notna(cc): self.country_idx[str(cc).upper()] = self.db[self.db['Country Code'] == cc].index.tolist()
+                # VAT index
+                if 'VAT Code' in self.db.columns:
+                    vat_series = self.db['VAT Code'].dropna().astype(str).str.upper().str.replace(' ', '').str.replace('-', '').str.replace('.', '')
+                    for idx, vat in vat_series.items():
+                        if vat:
+                            self.vat_idx.setdefault(vat, []).append(idx)
+
+                # Country index
+                if 'Country Code' in self.db.columns:
+                    for cc in self.db['Country Code'].dropna().unique():
+                        cc_upper = str(cc).upper()
+                        self.country_idx[cc_upper] = self.db[self.db['Country Code'] == cc].index.tolist()
+
+                st.success(f"✅ Database ready: {len(self.db)} companies indexed")
+
+        except Exception as e:
+            st.error(f"❌ Database indexing error: {str(e)}")
+            self.db = None
+            raise
 
     def search_name(self, name, country=None):
+        if self.db is None:
+            return None
+
         k = name.lower().strip()
         if k in self.name_idx:
             idxs = self.name_idx[k]
-            if country and country in self.country_idx: idxs = [i for i in idxs if i in self.country_idx[country]]
+            if country and country in self.country_idx: 
+                idxs = [i for i in idxs if i in self.country_idx[country]]
             return self._extract(self.db.iloc[idxs[0]]) if idxs else None
         return None
 
     def search_vat(self, vat, country=None):
+        if self.db is None:
+            return None
+
         k = str(vat).upper().replace(' ', '').replace('-', '').replace('.', '')
         if k in self.vat_idx:
             idxs = self.vat_idx[k]
-            if country and country in self.country_idx: idxs = [i for i in idxs if i in self.country_idx[country]]
+            if country and country in self.country_idx: 
+                idxs = [i for i in idxs if i in self.country_idx[country]]
             return self._extract(self.db.iloc[idxs[0]]) if idxs else None
         return None
 
     def _extract(self, row):
         d = {'source': 'database'}
         for f in ['Company Name', 'National ID', 'Fiscal Code', 'VAT Code', 'Country Code', 'Nace Code', 'Last Yr', 'Value of production (th)', 'Employees', 'Ebitda (th)', 'PFN (th)']:
-            if f in row.index and pd.notna(row[f]): d[f.lower().replace(' ', '_').replace('(', '').replace(')', '')] = row[f]
+            if f in row.index and pd.notna(row[f]): 
+                d[f.lower().replace(' ', '_').replace('(', '').replace(')', '')] = row[f]
         return d
 
 class AuthenticationManager:
@@ -253,26 +300,37 @@ class AuthenticationManager:
             if k not in st.session_state: 
                 st.session_state[k] = {} if k == 'auth_codes' else (False if k == 'authenticated' else ("" if k == 'user_email' else None))
 
-    def is_valid_email(self, e): return re.match(r'^[\w.+-]+@[\w.-]+\.[\w]+$', e) and e.lower().endswith(ALLOWED_DOMAIN.lower())
+    def is_valid_email(self, e): 
+        return re.match(r'^[\w.+-]+@[\w.-]+\.[\w]+$', e) and e.lower().endswith(ALLOWED_DOMAIN.lower())
 
-    def gen_code(self): return ''.join(random.choices(string.digits, k=6))
+    def gen_code(self): 
+        return ''.join(random.choices(string.digits, k=6))
 
-    def store_code(self, e, c): st.session_state.auth_codes[e] = {'code': c, 'timestamp': datetime.now(), 'attempts': 0}
+    def store_code(self, e, c): 
+        st.session_state.auth_codes[e] = {'code': c, 'timestamp': datetime.now(), 'attempts': 0}
 
     def verify(self, e, c):
-        if e not in st.session_state.auth_codes: return False, "No code"
+        if e not in st.session_state.auth_codes: 
+            return False, "No code"
         d = st.session_state.auth_codes[e]
         if datetime.now() - d['timestamp'] > timedelta(minutes=CODE_EXPIRY_MINUTES): 
-            del st.session_state.auth_codes[e]; return False, "Expired"
-        if d['attempts'] >= 3: del st.session_state.auth_codes[e]; return False, "Too many"
+            del st.session_state.auth_codes[e]
+            return False, "Expired"
+        if d['attempts'] >= 3: 
+            del st.session_state.auth_codes[e]
+            return False, "Too many"
         if d['code'] == c: 
             st.session_state.authenticated, st.session_state.user_email, st.session_state.auth_time = True, e, datetime.now()
-            del st.session_state.auth_codes[e]; return True, "Success"
-        d['attempts'] += 1; return False, f"{3-d['attempts']} left"
+            del st.session_state.auth_codes[e]
+            return True, "Success"
+        d['attempts'] += 1
+        return False, f"{3-d['attempts']} left"
 
-    def is_valid(self): return st.session_state.authenticated and st.session_state.auth_time and datetime.now() - st.session_state.auth_time <= timedelta(minutes=SESSION_TIMEOUT_MINUTES)
+    def is_valid(self): 
+        return st.session_state.authenticated and st.session_state.auth_time and datetime.now() - st.session_state.auth_time <= timedelta(minutes=SESSION_TIMEOUT_MINUTES)
 
-    def logout(self): st.session_state.authenticated, st.session_state.user_email, st.session_state.auth_time = False, "", None
+    def logout(self): 
+        st.session_state.authenticated, st.session_state.user_email, st.session_state.auth_time = False, "", None
 
 class EnhancedUKExtractor:
     """UK Company Number Extractor - Full Original Logic"""
@@ -301,7 +359,8 @@ class EnhancedUKExtractor:
                                 r['company_number'] = code
                                 r['status'] = 'Found'
                                 return r
-            except: pass
+            except: 
+                pass
         return r
 
 class MultiModeExtractor:
@@ -412,7 +471,8 @@ class MultiModeExtractor:
                             r[field_name] = extracted.strip()
                             r['status'] = 'Found'
                             return r
-            except: pass
+            except: 
+                pass
         return r
 
     def process_list(self, df, prog=None):
@@ -432,7 +492,8 @@ class MultiModeExtractor:
         vat_col = vc[0] if vc else None
 
         for idx, row in df.iterrows():
-            if prog: prog(idx+1, len(df))
+            if prog: 
+                prog(idx+1, len(df))
 
             name = str(row[name_col]).strip() if pd.notna(row[name_col]) else ""
             web = str(row[web_col]).strip() if web_col and pd.notna(row[web_col]) else ''
@@ -441,7 +502,8 @@ class MultiModeExtractor:
 
             if country_col and pd.notna(row[country_col]):
                 cv = str(row[country_col]).strip().upper()
-                if len(cv) == 2 and cv in COUNTRY_CODES: country = cv
+                if len(cv) == 2 and cv in COUNTRY_CODES: 
+                    country = cv
 
             result = self.process_single(name, web, country, vat)
             results.append(result)
@@ -529,16 +591,23 @@ def show_main():
         if st.button("📥 Load from Dropbox", type="primary"):
             df = load_database_from_dropbox()
             if df is not None:
-                st.session_state.company_db = CompanyDatabase(df)
-                st.rerun()
+                try:
+                    st.session_state.company_db = CompanyDatabase(df)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Failed to initialize database: {str(e)}")
 
         st.markdown("---")
 
         up = st.file_uploader("Or Upload", type=['xlsx','csv'])
         if up is not None:
-            df = pd.read_csv(up) if up.name.endswith('.csv') else pd.read_excel(up)
-            st.session_state.company_db = CompanyDatabase(df)
-            st.rerun()
+            try:
+                df = pd.read_csv(up) if up.name.endswith('.csv') else pd.read_excel(up)
+                st.info(f"📁 File loaded: {len(df)} rows")
+                st.session_state.company_db = CompanyDatabase(df)
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Failed to process file: {str(e)}")
 
         if st.button("⏭️ Web Only"):
             st.session_state.search_mode = 'web'
@@ -683,4 +752,5 @@ def main():
     else:
         show_auth(auth)
 
-if __name__ == "__main__": main()
+if __name__ == "__main__": 
+    main()
