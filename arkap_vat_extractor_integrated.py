@@ -35,7 +35,7 @@ def load_nace_mapping_from_dropbox():
         if 'DROPBOX_NACE_URL' in st.secrets:
             dropbox_url = st.secrets["DROPBOX_NACE_URL"]
         else:
-            st.warning("⚠️ Add DROPBOX_NACE_URL to Streamlit Secrets for NACE classification")
+            # Don't show warning, just return None silently
             return None
 
         download_url = get_dropbox_download_link(dropbox_url)
@@ -44,7 +44,7 @@ def load_nace_mapping_from_dropbox():
         df = pd.read_excel(io.BytesIO(response.content))
         return df
     except Exception as e:
-        st.warning(f"⚠️ NACE mapping not loaded: {str(e)}")
+        # Silent fail - NACE classification is optional
         return None
 
 ALLOWED_DOMAIN = "@arkap.ch"
@@ -427,13 +427,15 @@ def show_main():
 
     st.markdown("---")
 
-    # Load NACE classifier if not already loaded
+    # FIXED: Load NACE classifier only once, without blocking the UI
     if st.session_state.nace_classifier is None:
-        with st.spinner("📚 Loading NACE/ATECO/Arkap classification database..."):
-            nace_df = load_nace_mapping_from_dropbox()
-            if nace_df is not None:
-                st.session_state.nace_classifier = NACEClassifier(nace_df)
-                st.success("✅ NACE classification system loaded")
+        nace_df = load_nace_mapping_from_dropbox()
+        if nace_df is not None:
+            st.session_state.nace_classifier = NACEClassifier(nace_df)
+            st.success("✅ NACE classification system loaded")
+        else:
+            # Set to empty classifier to avoid repeated attempts
+            st.session_state.nace_classifier = NACEClassifier()
 
     if st.session_state.company_db is None:
         st.header("📊 Database Setup")
