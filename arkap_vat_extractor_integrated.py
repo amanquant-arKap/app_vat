@@ -34,8 +34,8 @@ class LinkedInContactDB:
     def __init__(self):
         self.df = None
         self.db_path = "linkedinDB.accdb"
-        self.encoded_df = None
-        self.cluster_results = {}
+        self.encoded_df = None          # <-- HERE
+        self.cluster_results = {}        # <-- HERE
     
     def load_from_access(self, db_path=None):
         """Load data from Access database file"""
@@ -1659,8 +1659,6 @@ def main():
 
 if __name__ == "__main__": 
     main()
-        self.encoded_df = None
-        self.cluster_results = {}
     
     def load_from_access(self, db_path=None):
         """Load data from Access database file"""
