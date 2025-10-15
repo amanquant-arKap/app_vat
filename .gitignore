@@ -1,8 +1,10 @@
 # Sensitive data - DO NOT commit
 databaseaziendearkap.xlsx
+linkedinDB.accdb
 *.xlsx
 *.xls
 *.csv
+*.accdb
 
 # Environment variables
 .env
