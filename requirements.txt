@@ -1,10 +1,11 @@
 streamlit
 pandas
+plotly
+scikit-learn
+scipy
+numpy
+pyodbc
 openpyxl
 requests
-bs4
-plotly
-pyodbc
-scikit-learn 
-scipy 
-numpy
+beautifulsoup4
+lxml
