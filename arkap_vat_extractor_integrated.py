@@ -1659,8 +1659,8 @@ def main():
 
 if __name__ == "__main__": 
     main()
-    self.encoded_df = None
-    self.cluster_results = {}
+         self.encoded_df = None
+         self.cluster_results = {}
     
     def load_from_access(self, db_path=None):
         """Load data from Access database file"""
