@@ -4,10 +4,220 @@ import io, re, time, requests, random, string, os
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
+import plotly.express as px
+import plotly.graph_objects as go
+
+# Try importing pyodbc for Access database (optional - will work without it)
+try:
+    import pyodbc
+    PYODBC_AVAILABLE = True
+except ImportError:
+    PYODBC_AVAILABLE = False
+
+
+# ============================================================================
+# ACCESS DATABASE MODULE FOR LINKEDIN CONTACTS
+# ============================================================================
+
+class LinkedInContactDB:
+    """
+    Manager for LinkedIn Contact Database (linkedinDB.accdb)
+    Provides data loading and analytics visualization
+    """
+    
+    def __init__(self):
+        self.df = None
+        self.db_path = "linkedinDB.accdb"
+    
+    def load_from_access(self, db_path=None):
+        """Load data from Access database file"""
+        if not PYODBC_AVAILABLE:
+            st.error("❌ pyodbc not installed. Install with: pip install pyodbc")
+            return False
+        
+        try:
+            path = db_path or self.db_path
+            
+            with st.spinner(f"📥 Loading {path}..."):
+                # Connection string for Access database
+                conn_str = (
+                    r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};'
+                    rf'DBQ={path};'
+                )
+                
+                conn = pyodbc.connect(conn_str)
+                
+                # Get list of tables
+                cursor = conn.cursor()
+                tables = [table.table_name for table in cursor.tables(tableType='TABLE')]
+                
+                if not tables:
+                    st.error("❌ No tables found in database")
+                    return False
+                
+                # Load the first table (or you can make this selectable)
+                table_name = tables[0]
+                st.info(f"📊 Loading table: {table_name}")
+                
+                # Read into pandas DataFrame
+                query = f"SELECT * FROM [{table_name}]"
+                self.df = pd.read_sql(query, conn)
+                
+                conn.close()
+                
+                st.success(f"✅ Loaded {len(self.df)} contacts from {table_name}")
+                return True
+                
+        except Exception as e:
+            st.error(f"❌ Error loading Access database: {str(e)}")
+            st.info("💡 Make sure linkedinDB.accdb is in the same folder as this app")
+            return False
+    
+    def load_from_upload(self, uploaded_file):
+        """Load data from uploaded file (CSV or Excel) as fallback"""
+        try:
+            if uploaded_file.name.endswith('.csv'):
+                self.df = pd.read_csv(uploaded_file)
+            else:
+                self.df = pd.read_excel(uploaded_file)
+            
+            st.success(f"✅ Loaded {len(self.df)} contacts")
+            return True
+        except Exception as e:
+            st.error(f"❌ Error loading file: {str(e)}")
+            return False
+    
+    def get_clustering_columns(self):
+        """Identify columns suitable for clustering analysis"""
+        if self.df is None:
+            return []
+        
+        # Common column names to look for
+        priority_cols = ['region', 'province', 'marginoferror2', 'country', 
+                        'city', 'industry', 'position', 'company', 'sector']
+        
+        available_cols = []
+        for col in priority_cols:
+            matching = [c for c in self.df.columns if col.lower() in c.lower()]
+            available_cols.extend(matching)
+        
+        # Add all categorical columns
+        for col in self.df.columns:
+            if col not in available_cols and self.df[col].dtype == 'object':
+                available_cols.append(col)
+        
+        return list(dict.fromkeys(available_cols))  # Remove duplicates, keep order
+    
+    def get_numeric_columns(self):
+        """Get numeric columns for metrics"""
+        if self.df is None:
+            return []
+        return [col for col in self.df.columns if pd.api.types.is_numeric_dtype(self.df[col])]
+    
+    def visualize_clusters(self, cluster_col, metric_col=None):
+        """Create visualizations for the selected clustering dimension"""
+        if self.df is None:
+            st.warning("No data loaded")
+            return
+        
+        st.subheader(f"📊 Analysis by {cluster_col}")
+        
+        # Clean data for this column
+        clean_df = self.df[self.df[cluster_col].notna()].copy()
+        
+        if len(clean_df) == 0:
+            st.warning(f"No data available for {cluster_col}")
+            return
+        
+        # Count by cluster
+        cluster_counts = clean_df[cluster_col].value_counts().head(20)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("Total Contacts", len(clean_df))
+            st.metric("Unique Values", clean_df[cluster_col].nunique())
+        
+        with col2:
+            if metric_col and metric_col in clean_df.columns:
+                avg_val = clean_df[metric_col].mean()
+                st.metric(f"Avg {metric_col}", f"{avg_val:.2f}")
+        
+        # Bar chart
+        fig_bar = px.bar(
+            x=cluster_counts.index,
+            y=cluster_counts.values,
+            labels={'x': cluster_col, 'y': 'Count'},
+            title=f'Distribution by {cluster_col}',
+            color=cluster_counts.values,
+            color_continuous_scale='Blues'
+        )
+        fig_bar.update_layout(showlegend=False, xaxis_tickangle=-45)
+        st.plotly_chart(fig_bar, use_container_width=True)
+        
+        # Pie chart for top categories
+        if len(cluster_counts) > 1:
+            fig_pie = px.pie(
+                values=cluster_counts.values[:10],
+                names=cluster_counts.index[:10],
+                title=f'Top 10 {cluster_col} (Proportion)'
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
+        
+        # Data table
+        with st.expander("📋 View Detailed Data"):
+            summary_df = pd.DataFrame({
+                cluster_col: cluster_counts.index,
+                'Count': cluster_counts.values,
+                'Percentage': (cluster_counts.values / len(clean_df) * 100).round(2)
+            })
+            st.dataframe(summary_df, use_container_width=True)
+    
+    def cross_analysis(self, col1, col2):
+        """Cross-analysis between two dimensions"""
+        if self.df is None:
+            return
+        
+        st.subheader(f"🔀 Cross-Analysis: {col1} vs {col2}")
+        
+        clean_df = self.df[[col1, col2]].dropna()
+        
+        if len(clean_df) == 0:
+            st.warning("No data available for cross-analysis")
+            return
+        
+        # Create crosstab
+        crosstab = pd.crosstab(clean_df[col1], clean_df[col2])
+        
+        # Limit to top categories for readability
+        if len(crosstab) > 15:
+            top_idx = clean_df[col1].value_counts().head(15).index
+            crosstab = crosstab.loc[top_idx]
+        
+        if len(crosstab.columns) > 15:
+            top_cols = clean_df[col2].value_counts().head(15).index
+            crosstab = crosstab[top_cols]
+        
+        # Heatmap
+        fig_heat = px.imshow(
+            crosstab,
+            labels=dict(x=col2, y=col1, color="Count"),
+            title=f'Heatmap: {col1} vs {col2}',
+            color_continuous_scale='YlOrRd',
+            aspect='auto'
+        )
+        fig_heat.update_xaxes(side="bottom")
+        st.plotly_chart(fig_heat, use_container_width=True)
+        
+        # Show raw crosstab
+        with st.expander("📊 View Crosstab Data"):
+            st.dataframe(crosstab, use_container_width=True)
+
 
 # ============================================================================
 # NACE/ARKAP CONVERTER MODULE - Integrated with Fallback
 # ============================================================================
+
 
 class NaceArkapConverter:
     """
@@ -15,10 +225,12 @@ class NaceArkapConverter:
     If mapping file fails to load or URL is unreachable, app continues without conversion.
     """
 
+
     def __init__(self):
         self.lookups = None
         self.enabled = False
         self.mapping_url = None
+
 
     def load_mapping_from_url(self, url):
         """Load NACE mapping from Dropbox or URL with timeout and fallback"""
@@ -26,15 +238,19 @@ class NaceArkapConverter:
             if not url:
                 return False
 
+
             # Convert Dropbox sharing link to direct download
             download_url = url.replace('dl=0', 'dl=1').replace('www.dropbox.com', 'dl.dropboxusercontent.com')
+
 
             with st.spinner("📥 Loading NACE mapping..."):
                 response = requests.get(download_url, timeout=15)
                 response.raise_for_status()
 
+
                 # Try to parse as Excel
                 df = pd.read_excel(io.BytesIO(response.content))
+
 
                 if len(df) > 0:
                     self.lookups = self._create_lookups(df)
@@ -44,6 +260,7 @@ class NaceArkapConverter:
                 else:
                     st.warning("⚠️ NACE mapping file is empty - continuing without conversion")
                     return False
+
 
         except requests.Timeout:
             st.warning("⚠️ NACE mapping load timeout - continuing without conversion")
@@ -55,11 +272,13 @@ class NaceArkapConverter:
             st.warning(f"⚠️ Could not load NACE mapping - continuing without conversion")
             return False
 
+
     def _create_lookups(self, df):
         """Create lookup dictionaries from mapping dataframe"""
         try:
             nace_code_lookup = {}
             ateco_code_lookup = {}
+
 
             for idx, row in df.iterrows():
                 # Extract fields safely
@@ -76,15 +295,18 @@ class NaceArkapConverter:
                     'arkap_subindustry': str(row.iloc[9]).strip() if pd.notna(row.iloc[9]) else ''
                 }
 
+
                 # Build NACE code lookup
                 if record['nace_subcat_code'] and record['nace_subcat_code'] != 'nan':
                     key = record['nace_subcat_code'].lower().strip()
                     nace_code_lookup[key] = record
 
+
                 # Build ATECO code lookup
                 if record['ateco_subcat_code'] and record['ateco_subcat_code'] != 'nan':
                     key = record['ateco_subcat_code'].lower().strip()
                     ateco_code_lookup[key] = record
+
 
             return {
                 'nace_code': nace_code_lookup,
@@ -94,6 +316,7 @@ class NaceArkapConverter:
             st.warning(f"⚠️ Error creating NACE lookups - continuing without conversion")
             return None
 
+
     def convert_nace_code(self, nace_code):
         """
         Convert NACE code to Arkap Industry classification.
@@ -102,9 +325,11 @@ class NaceArkapConverter:
         if not self.enabled or not self.lookups or not nace_code:
             return None
 
+
         try:
             # Clean input
             input_clean = str(nace_code).strip().lower()
+
 
             # Try exact match in NACE codes
             if input_clean in self.lookups['nace_code']:
@@ -117,6 +342,7 @@ class NaceArkapConverter:
                     'match_type': 'NACE (Exact)'
                 }
 
+
             # Try exact match in ATECO codes
             if input_clean in self.lookups['ateco_code']:
                 result = self.lookups['ateco_code'][input_clean]
@@ -127,6 +353,7 @@ class NaceArkapConverter:
                     'ateco_subcategory': result['ateco_subcat_title'],
                     'match_type': 'ATECO (Exact)'
                 }
+
 
             # Try partial match (e.g., "62.01" matches "62.01.0")
             for key, value in self.lookups['nace_code'].items():
@@ -139,20 +366,25 @@ class NaceArkapConverter:
                         'match_type': 'NACE (Partial)'
                     }
 
+
             return None  # No match found
+
 
         except Exception as e:
             # Silent fallback - don't break the app
             return None
 
+
 # ============================================================================
 # ORIGINAL VAT EXTRACTOR CODE (WITH OPTIMIZED DATABASE LOADING)
 # ============================================================================
+
 
 def get_dropbox_download_link(shared_link):
     if 'dropbox.com' in shared_link:
         return shared_link.replace('dl=0', 'dl=1').replace('www.dropbox.com', 'dl.dropboxusercontent.com')
     return shared_link
+
 
 def load_database_from_dropbox():
     try:
@@ -162,7 +394,9 @@ def load_database_from_dropbox():
             st.warning("⚠️ Add DROPBOX_FILE_URL to Streamlit Secrets")
             return None
 
+
         download_url = get_dropbox_download_link(dropbox_url)
+
 
         with st.spinner("📥 Downloading database..."):
             response = requests.get(download_url, timeout=30)
@@ -174,10 +408,12 @@ def load_database_from_dropbox():
         st.error(f"❌ Download error: {str(e)}")
         return None
 
+
 ALLOWED_DOMAIN = "@arkap.ch"
 CODE_EXPIRY_MINUTES = 10
 SESSION_TIMEOUT_MINUTES = 60
 COUNTRY_CODES = {'AT': 'Austria', 'CH': 'Switzerland', 'DE': 'Germany', 'FR': 'France', 'GB': 'United Kingdom', 'IT': 'Italy', 'LU': 'Luxembourg', 'NL': 'Netherlands', 'PT': 'Portugal'}
+
 
 def safe_format(value, fmt="{:,.0f}", pre="", suf="", default="N/A"):
     if pd.isna(value) or value is None or value == '': return default
@@ -189,6 +425,7 @@ def safe_format(value, fmt="{:,.0f}", pre="", suf="", default="N/A"):
         return f"{pre}{fmt.format(float(value))}{suf}"
     except: return str(value) if value else default
 
+
 class CompanyDatabase:
     """
     OPTIMIZED: Uses vectorized operations instead of row-by-row iteration
@@ -199,8 +436,10 @@ class CompanyDatabase:
         self.vat_idx = {}
         self.country_idx = {}
 
+
         if df is not None:
             self._init(df)
+
 
     def _init(self, df):
         """FIXED: Optimized database initialization with progress feedback"""
@@ -233,7 +472,9 @@ class CompanyDatabase:
                     elif 'pfn' in c: 
                         mapping[col] = 'PFN (th)'
 
+
                 self.db = df.rename(columns=mapping)
+
 
                 # OPTIMIZED: Build indexes using vectorized operations
                 # Name index
@@ -243,6 +484,7 @@ class CompanyDatabase:
                         if name:
                             self.name_idx.setdefault(name, []).append(idx)
 
+
                 # VAT index
                 if 'VAT Code' in self.db.columns:
                     vat_series = self.db['VAT Code'].dropna().astype(str).str.upper().str.replace(' ', '').str.replace('-', '').str.replace('.', '')
@@ -250,22 +492,27 @@ class CompanyDatabase:
                         if vat:
                             self.vat_idx.setdefault(vat, []).append(idx)
 
+
                 # Country index
                 if 'Country Code' in self.db.columns:
                     for cc in self.db['Country Code'].dropna().unique():
                         cc_upper = str(cc).upper()
                         self.country_idx[cc_upper] = self.db[self.db['Country Code'] == cc].index.tolist()
 
+
                 st.success(f"✅ Database ready: {len(self.db)} companies indexed")
+
 
         except Exception as e:
             st.error(f"❌ Database indexing error: {str(e)}")
             self.db = None
             raise
 
+
     def search_name(self, name, country=None):
         if self.db is None:
             return None
+
 
         k = name.lower().strip()
         if k in self.name_idx:
@@ -275,9 +522,11 @@ class CompanyDatabase:
             return self._extract(self.db.iloc[idxs[0]]) if idxs else None
         return None
 
+
     def search_vat(self, vat, country=None):
         if self.db is None:
             return None
+
 
         k = str(vat).upper().replace(' ', '').replace('-', '').replace('.', '')
         if k in self.vat_idx:
@@ -287,6 +536,7 @@ class CompanyDatabase:
             return self._extract(self.db.iloc[idxs[0]]) if idxs else None
         return None
 
+
     def _extract(self, row):
         d = {'source': 'database'}
         for f in ['Company Name', 'National ID', 'Fiscal Code', 'VAT Code', 'Country Code', 'Nace Code', 'Last Yr', 'Value of production (th)', 'Employees', 'Ebitda (th)', 'PFN (th)']:
@@ -294,20 +544,25 @@ class CompanyDatabase:
                 d[f.lower().replace(' ', '_').replace('(', '').replace(')', '')] = row[f]
         return d
 
+
 class AuthenticationManager:
     def __init__(self):
-        for k in ['auth_codes', 'authenticated', 'user_email', 'auth_time', 'company_db', 'search_mode', 'nace_converter']:
+        for k in ['auth_codes', 'authenticated', 'user_email', 'auth_time', 'company_db', 'search_mode', 'nace_converter', 'data_type', 'linkedin_db']:
             if k not in st.session_state: 
                 st.session_state[k] = {} if k == 'auth_codes' else (False if k == 'authenticated' else ("" if k == 'user_email' else None))
+
 
     def is_valid_email(self, e): 
         return re.match(r'^[\w.+-]+@[\w.-]+\.[\w]+$', e) and e.lower().endswith(ALLOWED_DOMAIN.lower())
 
+
     def gen_code(self): 
         return ''.join(random.choices(string.digits, k=6))
 
+
     def store_code(self, e, c): 
         st.session_state.auth_codes[e] = {'code': c, 'timestamp': datetime.now(), 'attempts': 0}
+
 
     def verify(self, e, c):
         if e not in st.session_state.auth_codes: 
@@ -326,11 +581,14 @@ class AuthenticationManager:
         d['attempts'] += 1
         return False, f"{3-d['attempts']} left"
 
+
     def is_valid(self): 
         return st.session_state.authenticated and st.session_state.auth_time and datetime.now() - st.session_state.auth_time <= timedelta(minutes=SESSION_TIMEOUT_MINUTES)
 
+
     def logout(self): 
         st.session_state.authenticated, st.session_state.user_email, st.session_state.auth_time = False, "", None
+
 
 class EnhancedUKExtractor:
     """UK Company Number Extractor - Full Original Logic"""
@@ -344,6 +602,7 @@ class EnhancedUKExtractor:
             r'([0-9]{8})\s*(?:Company|Registered)',
             r'\b([0-9]{8})\b'
         ]
+
 
     def process(self, name, url=None):
         r = {'company_name': name, 'website': url or '', 'status': 'Not Found', 'source': 'web'}
@@ -362,6 +621,7 @@ class EnhancedUKExtractor:
             except: 
                 pass
         return r
+
 
 class MultiModeExtractor:
     def __init__(self, db=None, use_db=True, nace_converter=None):
@@ -420,9 +680,11 @@ class MultiModeExtractor:
             ]
         }
 
+
     def process_single(self, name, web, country, vat=None):
         """Process single company with NACE conversion if available"""
         result = None
+
 
         if self.use_db and self.db:
             result = self.db.search_name(name, country)
@@ -435,12 +697,14 @@ class MultiModeExtractor:
                     result['search_method'] = 'DB-VAT'
                     result['status'] = 'Found'
 
+
             if not result:
                 result = self._web(name, web, country)
                 result['search_method'] = 'DB failed → Web'
         else:
             result = self._web(name, web, country)
             result['search_method'] = 'Web only'
+
 
         # Apply NACE conversion if NACE code exists
         if result and self.nace_converter and 'nace_code' in result:
@@ -450,11 +714,14 @@ class MultiModeExtractor:
                 result['arkap_subindustry'] = conversion.get('arkap_subindustry', '')
                 result['nace_conversion_status'] = conversion.get('match_type', 'Converted')
 
+
         return result
+
 
     def _web(self, name, web, country):
         if country in self.extractors:
             return self.extractors[country].process(name, web)
+
 
         r = {'company_name': name, 'website': web, 'country_code': country, 'status': 'Not Found', 'source': 'web'}
         if web and country in self.patterns:
@@ -475,47 +742,226 @@ class MultiModeExtractor:
                 pass
         return r
 
+
     def process_list(self, df, prog=None):
         """Process list of companies with NACE conversion"""
         results = []
 
+
         nc = [c for c in df.columns if 'company' in c.lower() or 'name' in c.lower()]
         name_col = nc[0] if nc else df.columns[0]
+
 
         wc = [c for c in df.columns if 'website' in c.lower() or 'url' in c.lower()]
         web_col = wc[0] if wc else None
 
+
         cc = [c for c in df.columns if 'country' in c.lower()]
         country_col = cc[0] if cc else None
+
 
         vc = [c for c in df.columns if 'vat' in c.lower() or 'fiscal' in c.lower()]
         vat_col = vc[0] if vc else None
 
+
         for idx, row in df.iterrows():
             if prog: 
                 prog(idx+1, len(df))
+
 
             name = str(row[name_col]).strip() if pd.notna(row[name_col]) else ""
             web = str(row[web_col]).strip() if web_col and pd.notna(row[web_col]) else ''
             vat = str(row[vat_col]).strip() if vat_col and pd.notna(row[vat_col]) else None
             country = 'GB'
 
+
             if country_col and pd.notna(row[country_col]):
                 cv = str(row[country_col]).strip().upper()
                 if len(cv) == 2 and cv in COUNTRY_CODES: 
                     country = cv
 
+
             result = self.process_single(name, web, country, vat)
             results.append(result)
             time.sleep(0.2)
 
+
         return results
+
+
+def show_contact_analytics():
+    """Display LinkedIn Contact Analytics Interface"""
+    st.title("👥 LinkedIn Contact Analytics")
+    
+    # Initialize LinkedIn DB if needed
+    if st.session_state.linkedin_db is None:
+        st.session_state.linkedin_db = LinkedInContactDB()
+    
+    linkedin_db = st.session_state.linkedin_db
+    
+    # Load data section
+    if linkedin_db.df is None:
+        st.header("📥 Load Contact Data")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("From Access Database")
+            if not PYODBC_AVAILABLE:
+                st.warning("⚠️ pyodbc not installed")
+                st.code("pip install pyodbc")
+            else:
+                db_path = st.text_input("Database path", value="linkedinDB.accdb")
+                if st.button("📂 Load from Access", type="primary"):
+                    linkedin_db.load_from_access(db_path)
+        
+        with col2:
+            st.subheader("From File Upload")
+            uploaded = st.file_uploader("Upload CSV or Excel", type=['csv', 'xlsx', 'xls'])
+            if uploaded:
+                if st.button("📤 Load Uploaded File", type="primary"):
+                    linkedin_db.load_from_upload(uploaded)
+        
+        if st.button("⬅️ Back to Main Menu"):
+            st.session_state.data_type = None
+            st.rerun()
+        
+        return
+    
+    # Data loaded - show analytics
+    st.success(f"✅ {len(linkedin_db.df)} contacts loaded")
+    
+    # Show data preview
+    with st.expander("👀 Preview Data"):
+        st.dataframe(linkedin_db.df.head(20), use_container_width=True)
+    
+    # Analytics tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Single Cluster", "🔀 Cross-Analysis", "📈 Overview", "⚙️ Settings"])
+    
+    with tab1:
+        st.subheader("Single Dimension Analysis")
+        
+        cluster_cols = linkedin_db.get_clustering_columns()
+        
+        if not cluster_cols:
+            st.warning("No suitable clustering columns found")
+        else:
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                selected_cluster = st.selectbox(
+                    "Select clustering dimension",
+                    cluster_cols,
+                    help="Choose a column to analyze"
+                )
+            
+            with col2:
+                numeric_cols = linkedin_db.get_numeric_columns()
+                metric_col = None
+                if numeric_cols:
+                    metric_col = st.selectbox("Optional metric", [''] + numeric_cols)
+            
+            if st.button("🔍 Analyze", type="primary"):
+                linkedin_db.visualize_clusters(selected_cluster, metric_col if metric_col else None)
+    
+    with tab2:
+        st.subheader("Cross-Dimension Analysis")
+        
+        cluster_cols = linkedin_db.get_clustering_columns()
+        
+        if len(cluster_cols) < 2:
+            st.warning("Need at least 2 clustering columns for cross-analysis")
+        else:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                dim1 = st.selectbox("First dimension", cluster_cols, key='dim1')
+            
+            with col2:
+                dim2_options = [c for c in cluster_cols if c != dim1]
+                dim2 = st.selectbox("Second dimension", dim2_options, key='dim2')
+            
+            if st.button("🔀 Cross-Analyze", type="primary"):
+                linkedin_db.cross_analysis(dim1, dim2)
+    
+    with tab3:
+        st.subheader("Dataset Overview")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Total Contacts", len(linkedin_db.df))
+        
+        with col2:
+            st.metric("Total Columns", len(linkedin_db.df.columns))
+        
+        with col3:
+            completeness = (1 - linkedin_db.df.isnull().sum().sum() / (len(linkedin_db.df) * len(linkedin_db.df.columns))) * 100
+            st.metric("Data Completeness", f"{completeness:.1f}%")
+        
+        # Column info
+        st.subheader("📋 Column Information")
+        
+        col_info = pd.DataFrame({
+            'Column': linkedin_db.df.columns,
+            'Type': linkedin_db.df.dtypes.astype(str),
+            'Non-Null': linkedin_db.df.count(),
+            'Null %': ((linkedin_db.df.isnull().sum() / len(linkedin_db.df)) * 100).round(2)
+        })
+        
+        st.dataframe(col_info, use_container_width=True)
+        
+        # Quick stats for clustering columns
+        st.subheader("🎯 Clustering Columns Summary")
+        cluster_cols = linkedin_db.get_clustering_columns()
+        
+        if cluster_cols:
+            summary_data = []
+            for col in cluster_cols[:10]:  # Limit to first 10
+                summary_data.append({
+                    'Column': col,
+                    'Unique Values': linkedin_db.df[col].nunique(),
+                    'Most Common': str(linkedin_db.df[col].mode()[0]) if len(linkedin_db.df[col].mode()) > 0 else 'N/A'
+                })
+            
+            st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
+    
+    with tab4:
+        st.subheader("⚙️ Settings & Actions")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🔄 Reload Data"):
+                st.session_state.linkedin_db = None
+                st.rerun()
+        
+        with col2:
+            if st.button("⬅️ Back to Main Menu"):
+                st.session_state.data_type = None
+                st.rerun()
+        
+        # Export options
+        st.subheader("💾 Export Data")
+        
+        csv = io.StringIO()
+        linkedin_db.df.to_csv(csv, index=False)
+        
+        st.download_button(
+            "📥 Download as CSV",
+            csv.getvalue(),
+            f"linkedin_contacts_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            "text/csv"
+        )
+
 
 def show_auth(auth):
     st.title("🔐 arKap VAT Extractor")
     st.info("🏢 @arkap.ch only")
 
+
     t1, t2 = st.tabs(["📧 Email", "🔑 Code"])
+
 
     with t1:
         e = st.text_input("Email")
@@ -526,6 +972,7 @@ def show_auth(auth):
                 st.success(f"Code: {c}")
             else:
                 st.error("Invalid")
+
 
     with t2:
         e = st.text_input("Email", key="e2")
@@ -540,8 +987,10 @@ def show_auth(auth):
             else:
                 st.error(msg)
 
+
 def show_main():
-    st.title("🌍 arKap VAT Extractor")
+    st.title("🌍 arKap Data Platform")
+
 
     c1, c2 = st.columns([3,1])
     with c1:
@@ -551,20 +1000,25 @@ def show_main():
             AuthenticationManager().logout()
             st.rerun()
 
+
     st.markdown("---")
+
 
     # Initialize NACE converter if not already done
     if st.session_state.nace_converter is None:
         st.session_state.nace_converter = NaceArkapConverter()
+
 
     # NACE Mapping Setup (Optional)
     with st.expander("🔧 NACE-to-Arkap Mapping (Optional)", expanded=False):
         st.write("Enable industry classification conversion by loading NACE mapping file from Dropbox.")
         st.write("**Note:** App works without this - it's optional for enhanced classification.")
 
+
         nace_url = st.text_input("NACE Mapping Dropbox URL (optional)", 
                                   value=st.secrets.get("NACE_MAPPING_URL", "") if "NACE_MAPPING_URL" in st.secrets else "",
                                   help="Dropbox share link to backupindustrylinked.xlsx")
+
 
         col1, col2 = st.columns(2)
         with col1:
@@ -574,19 +1028,56 @@ def show_main():
                 else:
                     st.warning("Please provide a Dropbox URL")
 
+
         with col2:
             if st.session_state.nace_converter.enabled:
                 st.success("✅ NACE Mapping Active")
             else:
                 st.info("ℹ️ NACE Mapping Disabled")
 
+
+    # DATA TYPE SELECTION: Company or Contact
+    if st.session_state.data_type is None:
+        st.header("📊 Select Data Type")
+        st.write("Choose what type of data you want to work with:")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("🏢 Company Data", type="primary", use_container_width=True):
+                st.session_state.data_type = 'company'
+                st.rerun()
+        with c2:
+            if st.button("👥 Contact Data (LinkedIn)", use_container_width=True):
+                st.session_state.data_type = 'contact'
+                st.rerun()
+        
+        return
+    
+    # Show contact analytics if contact data type selected
+    if st.session_state.data_type == 'contact':
+        show_contact_analytics()
+        return
+
+
+    # COMPANY DATA FLOW (Original logic continues below)
+    st.info(f"📊 Working with: **Company Data**")
+    if st.button("🔄 Change Data Type"):
+        st.session_state.data_type = None
+        st.session_state.search_mode = None
+        st.rerun()
+    
+    st.markdown("---")
+
+
     # Database Setup
     if st.session_state.company_db is None:
         st.header("📊 Database Setup")
 
+
         with st.expander("ℹ️ Dropbox Setup", expanded=True):
             st.write("1. Share file on Dropbox → Copy link")
             st.write('2. App Settings → Secrets → Add: DROPBOX_FILE_URL = "your_link"')
+
 
         if st.button("📥 Load from Dropbox", type="primary"):
             df = load_database_from_dropbox()
@@ -597,7 +1088,9 @@ def show_main():
                 except Exception as e:
                     st.error(f"❌ Failed to initialize database: {str(e)}")
 
+
         st.markdown("---")
+
 
         up = st.file_uploader("Or Upload", type=['xlsx','csv'])
         if up is not None:
@@ -609,11 +1102,14 @@ def show_main():
             except Exception as e:
                 st.error(f"❌ Failed to process file: {str(e)}")
 
+
         if st.button("⏭️ Web Only"):
             st.session_state.search_mode = 'web'
             st.rerun()
 
+
         return
+
 
     # Search Mode Selection
     if st.session_state.search_mode is None:
@@ -628,21 +1124,26 @@ def show_main():
                 st.rerun()
         return
 
+
     st.info(f"Mode: {st.session_state.search_mode.upper()}")
     if st.button("Change"):
         st.session_state.search_mode = None
         st.rerun()
 
+
     st.markdown("---")
+
 
     # Main Functionality Tabs
     t1, t2 = st.tabs(["Bulk", "Single"])
+
 
     with t1:
         f = st.file_uploader("Company List", type=['csv','xlsx'])
         if f:
             df = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
             st.dataframe(df.head())
+
 
             if st.button("Process"):
                 ext = MultiModeExtractor(
@@ -651,11 +1152,14 @@ def show_main():
                     st.session_state.nace_converter
                 )
 
+
                 p = st.progress(0)
                 res = ext.process_list(df, lambda c,t: p.progress(c/t))
                 rdf = pd.DataFrame(res)
 
+
                 st.dataframe(rdf)
+
 
                 c1,c2,c3 = st.columns(3)
                 with c1:
@@ -665,9 +1169,11 @@ def show_main():
                 with c3:
                     st.metric("Rate%", f"{len([r for r in res if r['status']=='Found'])/len(res)*100:.1f}")
 
+
                 csv = io.StringIO()
                 rdf.to_csv(csv, index=False)
                 st.download_button("Download", csv.getvalue(), f"res_{datetime.now().strftime('%Y%m%d_%H%M')}.csv")
+
 
     with t2:
         c1,c2 = st.columns(2)
@@ -678,6 +1184,7 @@ def show_main():
         with c2:
             co = st.selectbox("Country", list(COUNTRY_CODES.keys()), format_func=lambda x:f"{COUNTRY_CODES[x]} ({x})")
 
+
         if st.button("Search") and n:
             ext = MultiModeExtractor(
                 st.session_state.company_db, 
@@ -686,8 +1193,10 @@ def show_main():
             )
             r = ext.process_single(n, w, co, v)
 
+
             if r['status']=='Found':
                 st.success(f"✅ {r.get('search_method')}")
+
 
                 if r.get('source')=='database':
                     st.subheader("📊 Database Results")
@@ -698,6 +1207,7 @@ def show_main():
                     with c2:
                         for k in ['country_code','nace_code']:
                             if k in r: st.write(f"**{k}:** {r[k]}")
+
 
                     # Show NACE Conversion if available
                     if 'arkap_industry' in r or 'arkap_subindustry' in r:
@@ -711,6 +1221,7 @@ def show_main():
                                 st.write(f"**Arkap Subindustry:** {r['arkap_subindustry']}")
                         if 'nace_conversion_status' in r:
                             st.caption(f"Match: {r['nace_conversion_status']}")
+
 
                     st.subheader("💰 Financial Data")
                     c1,c2,c3=st.columns(3)
@@ -726,10 +1237,12 @@ def show_main():
                         if 'pfn_th' in r:
                             st.metric("PFN",safe_format(r.get('pfn_th'),pre="€",suf="k"))
 
+
                 else:
                     st.subheader("🌐 Web Extraction Results")
                     extracted_data = {k: v for k, v in r.items()
                         if k not in ['company_name','website','status','source','search_method','country_code']}
+
 
                     if extracted_data:
                         for key, value in extracted_data.items():
@@ -737,20 +1250,25 @@ def show_main():
                     else:
                         st.info("✓ Company verified but no additional codes extracted from website")
 
+
             else:
                 st.warning("❌ Not found in database or website")
+
 
             with st.expander("🔍 Raw Data"):
                 st.json(r)
 
+
 def main():
-    st.set_page_config(page_title="arKap", page_icon="⚡", layout="wide")
+    st.set_page_config(page_title="arKap Platform", page_icon="⚡", layout="wide")
     auth = AuthenticationManager()
+
 
     if auth.is_valid():
         show_main()
     else:
         show_auth(auth)
+
 
 if __name__ == "__main__": 
     main()
