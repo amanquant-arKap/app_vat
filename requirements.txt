@@ -5,3 +5,6 @@ requests
 bs4
 plotly
 pyodbc
+scikit-learn 
+scipy 
+numpy
